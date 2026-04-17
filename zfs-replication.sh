@@ -452,7 +452,7 @@ if [[ "$PROMOTE" == true ]]; then
     fi
 
     # 2. Recovery / Consistency Check
-    if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" ]]; then
+    if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" || "$DESTROY_CHAIN" == true ]]; then
         TARGET_SNAP=""
         if [[ -n "$PROMOTE_SNAP" ]]; then
             TARGET_SNAP="$PROMOTE_SNAP"
@@ -464,7 +464,7 @@ if [[ "$PROMOTE" == true ]]; then
             total_nodes=${#NEW_NODES[@]}
             for n in "${NEW_NODES[@]}"; do
                 echo "  Querying $n..."
-                node_snaps=$(ssh "$n" "zfs list -t snap -H -o name -r ${n}-pool/${ds_name}" | cut -d'@' -f2)
+                node_snaps=$(ssh "$n" "zfs list -t snap -H -o name -r ${n}-pool/${ds_name}" 2>/dev/null | cut -d'@' -f2)
                 for s in $node_snaps; do
                     ((snap_counts["$s"]++))
                 done
@@ -479,23 +479,35 @@ if [[ "$PROMOTE" == true ]]; then
             done
         fi
 
-        if [[ -z "$TARGET_SNAP" ]]; then
-            die "ERR: Could not find a common snapshot across all nodes. Use --destroy-chain if you want to start fresh."
+        # SAFETY CHECK for --destroy-chain
+        if [[ "$DESTROY_CHAIN" == true && -n "$TARGET_SNAP" ]]; then
+            echo "ABORT: Common snapshot @$TARGET_SNAP found!"
+            echo "  Destruction is NOT necessary. Please use --promote --auto instead."
+            exit 1
         fi
 
-        # 3. Confirmation
-        if [[ "$YES" != true ]]; then
-            echo -n "Are you sure you want to rollback ALL nodes in the chain to @$TARGET_SNAP? (y/N): "
-            read -r resp
-            if [[ "$resp" != "y" ]]; then die "Aborted by user."; fi
-        fi
+        # If we reach here and it was only --destroy-chain with NO common snap, we continue to replication 
+        # (send_initial will handle the actual destruction if DESTROY_CHAIN is true)
+        
+        if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" ]]; then
+            if [[ -z "$TARGET_SNAP" ]]; then
+                die "ERR: Could not find a common snapshot across all nodes. Use --destroy-chain if you want to start fresh."
+            fi
 
-        # 4. Execute Rollbacks
-        for n in "${NEW_NODES[@]}"; do
-            echo "Rolling back $n to $TARGET_SNAP..."
-            ssh "$n" "zfs rollback -r ${n}-pool/${ds_name}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
-        done
-        echo "Chain successfully consistent at @$TARGET_SNAP"
+            # 3. Confirmation
+            if [[ "$YES" != true ]]; then
+                echo -n "Are you sure you want to rollback ALL nodes in the chain to @$TARGET_SNAP? (y/N): "
+                read -r resp
+                if [[ "$resp" != "y" ]]; then die "Aborted by user."; fi
+            fi
+
+            # 4. Execute Rollbacks
+            for n in "${NEW_NODES[@]}"; do
+                echo "Rolling back $n to $TARGET_SNAP..."
+                ssh "$n" "zfs rollback -r ${n}-pool/${ds_name}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
+            done
+            echo "Chain successfully consistent at @$TARGET_SNAP"
+        fi
     fi
 fi
 
