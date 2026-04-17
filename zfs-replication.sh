@@ -6,6 +6,40 @@
 
 dir=$(dirname "$0")
 
+# Helper functions
+get_zfs_prop() {
+    local prop=$1
+    local ds=$2
+    zfs get -H -o value "$prop" "$ds" 2>/dev/null | grep -v "^-$" | head -n 1
+}
+
+send_smtp_alert() {
+    local msg=$1
+    local host=$(get_zfs_prop "repl:smtp_host" "$dataset")
+    local port=$(get_zfs_prop "repl:smtp_port" "$dataset")
+    local user=$(get_zfs_prop "repl:smtp_user" "$dataset")
+    local pass=$(get_zfs_prop "repl:smtp_password" "$dataset")
+    local from=$(get_zfs_prop "repl:smtp_from" "$dataset")
+    local to=$(get_zfs_prop "repl:smtp_to" "$dataset")
+    local proto=$(get_zfs_prop "repl:smtp_protocol" "$dataset")
+    
+    [[ -z "$host" || -z "$to" ]] && return
+
+    echo "Sending alert email to $to..."
+    curl -s --url "${proto:-smtps}://${host}:${port:-465}" \
+         --user "${user}:${pass}" \
+         --mail-from "$from" \
+         --mail-rcpt "$to" \
+         --upload-file - <<EOF
+From: $from
+To: $to
+Subject: ZFS Replication Alert: $dataset on $(hostname)
+Date: $(date -R)
+
+$msg
+EOF
+}
+
 # --- START OF ZFSBUD CORE (Adapted from zfsbud.sh) ---
 
 zbud_PATH=/usr/bin:/sbin:/bin
@@ -13,7 +47,13 @@ zbud_timestamp_format="%Y-%m-%d-%H%M%S"
 
 zbud_msg() { echo "$*" 1>&2; }
 zbud_warn() { zbud_msg "WARNING: $*"; }
-zbud_die() { zbud_msg "ERROR: $*"; exit 1; }
+zbud_die() { 
+    zbud_msg "ERROR: $*"
+    if [[ -n "$dataset" ]]; then
+        send_smtp_alert "ERROR in ZFSBUD: $*"
+    fi
+    exit 1
+}
 
 zbud_config_read_file() {
   (grep -E "^${2}=" -m 1 "${1}" 2>/dev/null || echo "VAR=__UNDEFINED__") | head -n 1 | cut -d '=' -f 2-;
@@ -212,43 +252,13 @@ zfsbud_core() {
 
 # --- END OF ZFSBUD CORE ---
 
-# Helper functions for main script
+# Main script helpers
 die() {
     echo "$@"
+    if [[ -n "$dataset" ]]; then
+        send_smtp_alert "ERROR: $*"
+    fi
     exit 1
-}
-
-get_zfs_prop() {
-    local prop=$1
-    local ds=$2
-    zfs get -H -o value "$prop" "$ds" 2>/dev/null | grep -v "^-$" | head -n 1
-}
-
-send_smtp_alert() {
-    local msg=$1
-    local host=$(get_zfs_prop "repl:smtp_host" "$dataset")
-    local port=$(get_zfs_prop "repl:smtp_port" "$dataset")
-    local user=$(get_zfs_prop "repl:smtp_user" "$dataset")
-    local pass=$(get_zfs_prop "repl:smtp_password" "$dataset")
-    local from=$(get_zfs_prop "repl:smtp_from" "$dataset")
-    local to=$(get_zfs_prop "repl:smtp_to" "$dataset")
-    local proto=$(get_zfs_prop "repl:smtp_protocol" "$dataset")
-    
-    [[ -z "$host" || -z "$to" ]] && return
-
-    echo "Sending alert email to $to..."
-    curl -s --url "${proto:-smtps}://${host}:${port:-465}" \
-         --user "${user}:${pass}" \
-         --mail-from "$from" \
-         --mail-rcpt "$to" \
-         --upload-file - <<EOF
-From: $from
-To: $to
-Subject: ZFS Replication Alert: $dataset on $(hostname)
-Date: $(date -R)
-
-$msg
-EOF
 }
 
 purge_shipped_snapshots() {
