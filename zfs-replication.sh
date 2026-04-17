@@ -378,8 +378,28 @@ check_stuck_job() {
     local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
     [[ -z "$timeout_val" ]] && timeout_val="3600"
     
-    if [[ -f "$LOCKFILE" ]]; then
+    # Determine if we should wait or fail fast
+    # Wait for: promote, cascaded, suspend, resume, mark-only, or manual run (terminal)
+    local wait_for_lock=false
+    if [[ "$CASCADED" == true || "$PROMOTE" == true || "$SUSPEND" == true || "$RESUME" == true || "$MARK_ONLY" == true || -t 0 ]]; then
+        wait_for_lock=true
+    fi
+
+    local waited=0
+    while [[ -f "$LOCKFILE" ]]; do
         local lock_pid=$(cat "$LOCKFILE" 2>/dev/null)
+        
+        if [[ "$wait_for_lock" == true ]]; then
+            if [[ $waited -ge 300 ]]; then
+                die "ERR: Timeout waiting for lock after 5 minutes. Lock held by PID: $lock_pid"
+            fi
+            echo "Lock held by PID $lock_pid. Waiting... ($waited/300s)"
+            sleep 10
+            waited=$((waited + 10))
+            continue
+        fi
+
+        # Normal cron behavior (fail fast or check stuck)
         local cur_time=$(date +%s)
         local m_time=$(stat -c %Y "$LOCKFILE" 2>/dev/null || echo "$cur_time")
         local age=$((cur_time - m_time))
@@ -390,7 +410,7 @@ check_stuck_job() {
         else
             die "ERR: Replication already running ($age seconds ago). PID: $lock_pid"
         fi
-    fi
+    done
 
     echo "$$" > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT
