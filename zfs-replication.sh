@@ -448,16 +448,23 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
     fi
 
     echo "${ACTION} replication for $raw_dataset..."
+    
+    # Discovery chain (try local, then try to find master)
     CURRENT_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
-    if [[ -z "$CURRENT_CHAIN" ]]; then die "ERR: Cannot ${ACTION}, no existing repl:chain found on $local_ds"; fi
+    if [[ -z "$CURRENT_CHAIN" ]]; then
+        # If not on local, it might be an un-initialized node. 
+        # For simplicity in this script, we expect it to be set.
+        die "ERR: Cannot ${ACTION}, no existing repl:chain found on $local_ds. Please run from a configured node."
+    fi
 
     IFS=',' read -r -a nodes <<< "$CURRENT_CHAIN"
     for n in "${nodes[@]}"; do
         echo "  Setting repl:suspend=$VAL on $n..."
+        # Correctly map remote pool name (host-pool)
         ssh "$n" "zfs set repl:suspend=$VAL ${n}-pool/${ds_name}" || echo "  Warning: Failed to set property on $n"
     done
     
-    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $(hostname). New state: repl:suspend=$VAL"
+    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $(hostname). Master node: ${nodes[0]}. New state: repl:suspend=$VAL"
     exit 0
 fi
 
