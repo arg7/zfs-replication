@@ -118,17 +118,25 @@ zfsbud_core() {
   }
 
   send_initial() {
-    local first_snapshot_source=${source_snapshots[0]}
-    zbud_msg "Initial source snapshot: $first_snapshot_source"
+    local latest_snapshot_source=${source_snapshots[-1]}
+    zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
     zbud_msg "Sending initial snapshot to destination..."
+    # Map any source pool/dataset to destination_pool/dataset
+    local ds_name="${dataset#*/}"
+    local remote_ds="${destination_parent_dataset}/${ds_name}"
+    
+    # Identify LOCAL dataset to send from
+    local my_hostname=$(hostname)
+    local local_ds="${my_hostname}-pool/${ds_name}"
+
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
-        ! zfs send -w $recursive_send $verbose "$first_snapshot_source" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u $destination_parent_dataset/$dataset_name" && return 1
+        ! zfs send -w -R $verbose "$latest_snapshot_source" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u $remote_ds" && return 1
       else
-        ! zfs send -w $recursive_send $verbose "$first_snapshot_source" | zfs recv $resume -F -u "$destination_parent_dataset/$dataset_name" && return 1
+        ! zfs send -w -R $verbose "$latest_snapshot_source" | zfs recv $resume -F -u "$remote_ds" && return 1
       fi
     fi
-    last_snapshot_common="${first_snapshot_source#*@}"
+    last_snapshot_common="${latest_snapshot_source#*@}"
   }
 
   send_incremental() {
@@ -138,46 +146,56 @@ zfsbud_core() {
       return 0
     fi
     zbud_msg "Sending incremental: $last_snapshot_common -> ${last_snapshot_source#*@}"
+    local ds_name="${dataset#*/}"
+    local remote_ds="${destination_parent_dataset}/${ds_name}"
+    
+    # Identify LOCAL dataset to send from (e.g. node2-pool/data)
+    local my_hostname=$(hostname)
+    local local_ds="${my_hostname}-pool/${ds_name}"
+
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
-        ! zfs send -w $recursive_send $verbose -I "$dataset@$last_snapshot_common" "$last_snapshot_source" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -d -u $destination_parent_dataset" && return 1
+        ! zfs send -w $recursive_send $verbose -i "$local_ds@$last_snapshot_common" "$last_snapshot_source" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u $remote_ds" && return 1
       else
-        ! zfs send -w $recursive_send $verbose -I "$dataset@$last_snapshot_common" "$last_snapshot_source" | zfs recv $resume -F -d -u "$destination_parent_dataset" && return 1
+        ! zfs send -w $recursive_send $verbose -i "$local_ds@$last_snapshot_common" "$last_snapshot_source" | zfs recv $resume -F -u "$remote_ds" && return 1
       fi
     fi
   }
 
   # Simplified processing for zfs-replication.sh context
   for dataset in "${datasets[@]}"; do
-    local dataset_name=${dataset##*/}
-    zbud_msg "Processing $dataset -> $destination_parent_dataset/$dataset_name"
+    local ds_name="${dataset#*/}"
+    local my_hostname=$(hostname)
+    local local_ds="${my_hostname}-pool/${ds_name}"
     
-    set_source_snapshots "$dataset"
+    zbud_msg "Processing $local_ds -> ${destination_parent_dataset} (Target: ${destination_parent_dataset}/${ds_name})"
+    
+    set_source_snapshots "$local_ds"
     if ((${#source_snapshots[@]} < 1)); then
-       zbud_warn "No snapshots for $dataset"
+       zbud_warn "No snapshots for $local_ds"
        continue
     fi
 
-    set_resume_token "$destination_parent_dataset/$dataset_name"
+    local remote_ds="${destination_parent_dataset}/${ds_name}"
+    set_resume_token "$remote_ds"
     
     if [ -n "$resume_token" ]; then
        # Resume logic simplified
        if [ -z "$dry_run" ]; then
-         local pool=${destination_parent_dataset%%/*}
          if [ -n "$remote_shell" ]; then
-           zfs send -w $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -d -u $pool"
+           zfs send -w $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u ${destination_parent_dataset}"
          else
-           zfs send -w $verbose -t "$resume_token" | zfs recv $resume -F -d -u "$pool"
+           zfs send -w $verbose -t "$resume_token" | zfs recv $resume -F -u "${destination_parent_dataset}"
          fi
        fi
     fi
 
-    set_destination_snapshots "$dataset_name"
+    set_destination_snapshots "$ds_name"
     if ! set_common_snapshot; then
        if [ -n "$initial" ]; then
           send_initial || zbud_die "Initial send failed"
        else
-          zbud_warn "No common snapshots. Use -i for initial."
+          zbud_warn "No common snapshots for $local_ds. Use -i for initial."
           continue
        fi
     fi
@@ -294,7 +312,9 @@ dataset=$1
 label=${2:-"frequently"}
 keep_fallback=${3:-"10"}
 MARK_ONLY=false
+initial_send=false
 if [[ "$4" == "--mark-only" ]]; then MARK_ONLY=true; fi
+if [[ "$4" == "--initial" || "$5" == "--initial" ]]; then initial_send=true; fi
 
 # Identity & Configuration Discovery
 REPL_CHAIN=$(get_zfs_prop "repl:chain" "$dataset")
@@ -363,9 +383,15 @@ LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$dataset" | grep "@.*$
 
 # 2. Replication & Audit
 if [[ -n "$NEXT_HOP" ]]; then
-    echo "Replicating $dataset to $NEXT_HOP..."
+    # Resolve NEXT_HOP pool name (node2 -> node2-pool)
+    NEXT_HOP_HOST=${NEXT_HOP#*@}
+    NEXT_HOP_POOL="${NEXT_HOP_HOST}-pool"
+    
+    echo "Replicating $dataset to $NEXT_HOP (Pool: $NEXT_HOP_POOL)..."
     # Call internal zfsbud logic instead of external script
-    zfsbud_core -s "$dataset" -e "ssh $NEXT_HOP" -v "$dataset"
+    zfsbud_opts=""
+    if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
+    zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $NEXT_HOP" -v "$dataset"
     
     if [[ $? -ne 0 ]]; then
         echo 9999 > /var/run/keep-$label.txt
@@ -375,7 +401,9 @@ if [[ -n "$NEXT_HOP" ]]; then
         
         # PROPAGATE & VERIFY
         echo "Cascading: triggering downstream chain for $dataset on $NEXT_HOP"
-        DOWNSTREAM_OUT=$(ssh "$NEXT_HOP" "$dir/zfs-replication.sh $dataset $label $keep_fallback" 2>&1)
+        casc_opts=""
+        if [[ "$initial_send" == true ]]; then casc_opts="--initial"; fi
+        DOWNSTREAM_OUT=$(ssh "$NEXT_HOP" "zfs-replication.sh $dataset $label $keep_fallback $casc_opts" 2>&1)
         SSH_STATUS=$?
         
         # Bubble up logs
