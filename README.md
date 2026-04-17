@@ -6,10 +6,12 @@ A robust, cascading ZFS replication script designed for multi-node chains. It ha
 
 - **Cascading Replication**: Automatically triggers replication on the next hop in the chain once the local transfer is verified.
 - **End-to-End Verification**: Confirms the arrival of the specific snapshot at the final sink before marking local snapshots as "shipped".
+- **Automatic Configuration Sync**: All `repl:*` properties (retention, SMTP, chain order) are automatically propagated from the master to all downstream nodes during replication.
+- **Master Promotion**: Use the `--promote` flag to promote any node to Master safely. An email notice is sent automatically upon promotion.
 - **Robust Transfers**: Uses `zfsbud` logic with `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
 - **Graduated Retention**: Different retention policies (keep counts) for each node in the chain.
 - **Stuck Job Detection**: Prevents concurrent runs and alerts via SMTP if a job is stuck beyond a timeout.
-- **SMTP Alerts**: Sends email notifications for critical failures and stuck jobs.
+- **SMTP Alerts**: Sends email notifications for critical failures, stuck jobs, and role changes.
 
 ## Dependencies
 
@@ -32,7 +34,7 @@ The following packages must be installed on all nodes in the replication chain:
 
 ## Configuration (ZFS Properties)
 
-Configuration is stored directly in ZFS properties on the **source dataset**.
+Configuration is stored directly in ZFS properties on the **source dataset**. Once set on the master, these properties propagate to the rest of the chain automatically.
 
 ### Required Properties
 
@@ -75,6 +77,13 @@ For the first-ever run (when no common snapshots exist on downstream nodes), use
 ```bash
 zfs-replication.sh dpool/mydata min1 10 --initial
 ```
+
+### Master Promotion
+To promote the current node to Master and update the replication order:
+```bash
+zfs-replication.sh dpool/mydata min1 10 --promote
+```
+This moves the current node to the front of `repl:chain`, sends a notification email, and triggers a replication to propagate the new configuration.
 
 ### Maintenance
 To purge old shipped snapshots without performing a new replication:
