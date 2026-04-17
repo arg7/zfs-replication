@@ -403,6 +403,8 @@ MARK_ONLY=false
 initial_send=false
 PROMOTE=false
 CASCADED=false
+SUSPEND=false
+RESUME=false
 AUTO=false
 DESTROY_CHAIN=false
 YES=false
@@ -416,6 +418,8 @@ while [[ $# -gt 0 ]]; do
         --mark-only) MARK_ONLY=true; shift ;;
         --initial) initial_send=true; shift ;;
         --promote) PROMOTE=true; shift ;;
+        --suspend) SUSPEND=true; shift ;;
+        --resume) RESUME=true; shift ;;
         --cascaded) CASCADED=true; shift ;;
         --auto) AUTO=true; shift ;;
         --destroy-chain) DESTROY_CHAIN=true; shift ;;
@@ -425,6 +429,29 @@ while [[ $# -gt 0 ]]; do
         *) shift ;;
     esac
 done
+
+# Handle Suspend/Resume logic
+if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
+    ACTION="SUSPENDED"
+    VAL="true"
+    if [[ "$RESUME" == true ]]; then 
+        ACTION="RESUMED"
+        VAL="false"
+    fi
+
+    echo "${ACTION} replication for $raw_dataset..."
+    CURRENT_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
+    if [[ -z "$CURRENT_CHAIN" ]]; then die "ERR: Cannot ${ACTION}, no existing repl:chain found on $local_ds"; fi
+
+    IFS=',' read -r -a nodes <<< "$CURRENT_CHAIN"
+    for n in "${nodes[@]}"; do
+        echo "  Setting repl:suspend=$VAL on $n..."
+        ssh "$n" "zfs set repl:suspend=$VAL ${n}-pool/${ds_name}" || echo "  Warning: Failed to set property on $n"
+    done
+    
+    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $(hostname). New state: repl:suspend=$VAL"
+    exit 0
+fi
 
 # Handle Promotion logic
 if [[ "$PROMOTE" == true ]]; then
@@ -565,6 +592,15 @@ fi
 if [[ "$IS_MASTER" == false && "$CASCADED" == false && "$PROMOTE" == false && "$MARK_ONLY" == false ]]; then
     echo "INFO: Node $ME is not Master. Skipping initiation (Cron safety)."
     exit 0
+fi
+
+# Suspend check (only affects Master initiation)
+if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && "$MARK_ONLY" == false ]]; then
+    SUSPEND_STATE=$(get_zfs_prop "repl:suspend" "$local_ds")
+    if [[ "$SUSPEND_STATE" == "true" ]]; then
+        echo "INFO: Replication is SUSPENDED (repl:suspend=true). Skipping run."
+        exit 0
+    fi
 fi
 
 if [[ "$MARK_ONLY" == true ]]; then
