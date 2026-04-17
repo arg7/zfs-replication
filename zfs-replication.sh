@@ -365,6 +365,7 @@ dataset=$local_ds # Ensure helper functions use the local path
 MARK_ONLY=false
 initial_send=false
 PROMOTE=false
+CASCADED=false
 sync_props_data=""
 
 # Parse additional flags
@@ -374,6 +375,7 @@ while [[ $# -gt 0 ]]; do
         --mark-only) MARK_ONLY=true; shift ;;
         --initial) initial_send=true; shift ;;
         --promote) PROMOTE=true; shift ;;
+        --cascaded) CASCADED=true; shift ;;
         --sync-props) sync_props_data="$2"; shift 2 ;;
         *) shift ;;
     esac
@@ -454,6 +456,13 @@ if [[ -n "$REPL_CHAIN" ]]; then
     fi
 fi
 
+# Cron Safety: Only the master node initiates replication.
+# Downstream nodes only run if explicitly triggered via --cascaded, --promote, or --mark-only.
+if [[ "$IS_MASTER" == false && "$CASCADED" == false && "$PROMOTE" == false && "$MARK_ONLY" == false ]]; then
+    echo "INFO: Node $ME is not Master. Skipping initiation (Cron safety)."
+    exit 0
+fi
+
 if [[ "$MARK_ONLY" == true ]]; then
     if [[ "$IS_MASTER" == true ]]; then
         purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
@@ -505,7 +514,7 @@ if [[ -n "$NEXT_HOP" ]]; then
         # GATHER PROPERTIES FOR PROPAGATION
         PROPS_ARG=$(get_repl_props_encoded "$local_ds")
         
-        DOWNSTREAM_OUT=$(ssh "$NEXT_HOP" "zfs-replication.sh $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG" 2>&1)
+        DOWNSTREAM_OUT=$(ssh "$NEXT_HOP" "zfs-replication.sh $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
         SSH_STATUS=$?
         
         # Bubble up logs

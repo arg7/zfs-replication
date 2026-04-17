@@ -8,7 +8,8 @@ A robust, cascading ZFS replication script designed for multi-node chains. It ha
 - **End-to-End Verification**: Confirms the arrival of the specific snapshot at the final sink before marking local snapshots as "shipped".
 - **Automatic Configuration Sync**: All `repl:*` properties (retention, SMTP, chain order) are automatically propagated from the master to all downstream nodes during replication.
 - **Master Promotion**: Use the `--promote` flag to promote any node to Master safely. An email notice is sent automatically upon promotion.
-- **Robust Transfers**: Uses `zfsbud` logic with `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
+- **Cron Safety**: The script can be configured in cron on **all nodes**. It will automatically detect if it is the current Master and only initiate replication if it is at the top of the `repl:chain`.
+- **Robust Transfers**: Uses `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
 - **Graduated Retention**: Different retention policies (keep counts) for each node in the chain.
 - **Stuck Job Detection**: Prevents concurrent runs and alerts via SMTP if a job is stuck beyond a timeout.
 - **SMTP Alerts**: Sends email notifications for critical failures, stuck jobs, and role changes.
@@ -24,12 +25,25 @@ The following packages must be installed on all nodes in the replication chain:
 - `zstd`
 - `curl` (for SMTP alerts)
 
-## Installation
+## Installation & Setup
 
-1. Clone the repository.
-2. Link the script to your PATH:
+1. **Clone & Link**:
    ```bash
-   ln -s $(pwd)/zfs-replication.sh /usr/local/bin/zfs-replication.sh
+   git clone https://github.com/arg7/zfs-replication.git
+   ln -s $(pwd)/zfs-replication/zfs-replication.sh /usr/local/bin/zfs-replication.sh
+   ```
+
+2. **SSH Connectivity**:
+   Ensure **Full Mesh** SSH connectivity between all nodes in the chain. Every node must be able to SSH into every other node as the `repl:user` (usually `root`) without a password.
+   - Use `ssh-keyscan` to populate `known_hosts` for all node hostnames.
+   - Distribute the public key of every node to every other node's `authorized_keys`.
+
+3. **ZFS Properties**:
+   Set up the initial configuration on the Master node's dataset:
+   ```bash
+   zfs set repl:chain=node1,node2,node3 dpool/mydata
+   zfs set repl:min1=10,30,90 dpool/mydata
+   # ... set SMTP properties ...
    ```
 
 ## Configuration (ZFS Properties)
@@ -39,57 +53,63 @@ Configuration is stored directly in ZFS properties on the **source dataset**. On
 ### Required Properties
 
 - `repl:chain`: Comma-separated list of hostnames in the replication order.
-  - Example: `zfs set repl:chain=node1,node2,node3 dpool/mydata`
 - `repl:user`: SSH user for connecting to the next hop (defaults to `root`).
-  - Example: `zfs set repl:user=backupuser dpool/mydata`
-
-### Retention Properties
-
-Set the number of snapshots to keep for a specific label, corresponding to the nodes in the chain.
-- `repl:<label>`: Comma-separated keep counts.
-  - Example: `zfs set repl:min1=10,30,90 dpool/mydata` (Keep 10 on node1, 30 on node2, 90 on node3).
+- `repl:<label>`: Comma-separated keep counts (e.g., `repl:min1=10,30,90`).
 
 ### Alerting & Safety
 
 - `repl:timeout`: Seconds before a job is considered stuck (defaults to 3600).
-- `repl:smtp_host`: SMTP server address.
-- `repl:smtp_port`: SMTP server port (defaults to 465).
-- `repl:smtp_user`: SMTP username.
-- `repl:smtp_password`: SMTP password.
-- `repl:smtp_from`: Sender email address.
-- `repl:smtp_to`: Recipient email address.
-- `repl:smtp_protocol`: `smtps` (default) or `smtp`.
+- `repl:smtp_host`, `repl:smtp_port`, `repl:smtp_user`, `repl:smtp_password`, `repl:smtp_from`, `repl:smtp_to`, `repl:smtp_protocol`.
 
 ## Usage
 
 ### Basic Replication
-Run on the master node (the first node in the chain):
 ```bash
 zfs-replication.sh <dataset> <label> <keep_fallback>
 ```
-Example:
-```bash
-zfs-replication.sh dpool/mydata min1 10
-```
 
 ### Initial Replication
-For the first-ever run (when no common snapshots exist on downstream nodes), use the `--initial` flag:
+For the first run (no common snapshots downstream):
 ```bash
 zfs-replication.sh dpool/mydata min1 10 --initial
 ```
 
 ### Master Promotion
-To promote the current node to Master and update the replication order:
+To promote the current node to Master:
 ```bash
 zfs-replication.sh dpool/mydata min1 10 --promote
 ```
-This moves the current node to the front of `repl:chain`, sends a notification email, and triggers a replication to propagate the new configuration.
+This updates the `repl:chain` on the current node and triggers a replication to update the rest of the chain.
 
-### Maintenance
-To purge old shipped snapshots without performing a new replication:
-```bash
-zfs-replication.sh dpool/mydata min1 10 --mark-only
+## Cron Integration
+
+You can safely add the same cron job to **all nodes** in your cluster.
+
+Example `/etc/cron.d/zfs-repl`:
+```cron
+* * * * * root /usr/local/bin/zfs-replication.sh dpool/mydata min1 10 >> /var/log/zfs-replication.log 2>&1
 ```
+
+- **Master Node**: Will execute the full snapshot and replication cycle.
+- **Downstream Nodes**: Will check if they are Master, see that they are not, and exit immediately with `INFO: Node is not Master. Skipping initiation (Cron safety).`.
+- **After Promotion**: If you promote `node2`, its cron job will automatically start initiating replication on the next minute, while `node1` will automatically become passive.
+
+## Monitoring & Troubleshooting
+
+- **Logs**: Check `/var/log/syslog` for `zfs-auto-snapshot` activity.
+- **Verification**: Check the `zfs-send:shipped` property on snapshots:
+  ```bash
+  zfs list -t snap -o name,zfs-send:shipped -r dpool/mydata
+  ```
+- **Lock Files**: If a job is interrupted, check `/tmp/<dataset>-<label>.lock`.
+- **Manual Test**: You can run the script manually from any node. Use the `--mark-only` flag to test rotation and retention without triggering a new send.
+
+## Gotchas & Lessons Learned
+
+1. **Hostname Matching**: The hostnames in `repl:chain` must exactly match the output of the `hostname` command on each node.
+2. **Dataset Paths**: The script automatically maps between local pool names (e.g., `node1-pool` vs `node2-pool`) assuming the dataset structure below the pool is identical.
+3. **Property Propagation**: Custom ZFS properties (`repl:*`) are passed via base64 arguments during the SSH cascade because incremental ZFS streams do not carry parent dataset property changes.
+4. **SSH Paths**: Ensure the script is in the same absolute path (or symlinked into `/usr/local/bin`) on all nodes.
 
 ## Credits
 This script incorporates core logic from `zfsbud.sh` by [Pawel Ginalski (gbyte.dev)](https://gbyte.dev).
