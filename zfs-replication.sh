@@ -489,10 +489,13 @@ if [[ "$PROMOTE" == true ]]; then
         echo "  Updating chain: $CURRENT_CHAIN -> $NEW_CHAIN"
         zfs set repl:chain="$NEW_CHAIN" "$local_ds"
         send_smtp_alert "NOTICE: Node $my_hostname has been PROMOTED to Master for dataset $raw_dataset. New chain: $NEW_CHAIN"
+        # RE-FETCH identity for the current run
+        REPL_CHAIN="$NEW_CHAIN"
+        IS_MASTER=true
+        ME_INDEX=0
     else
         echo "  $my_hostname is already Master in local config."
     fi
-
     # 2. Recovery / Consistency Check
     if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" || "$DESTROY_CHAIN" == true ]]; then
         TARGET_SNAP=""
