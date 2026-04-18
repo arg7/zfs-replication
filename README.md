@@ -50,19 +50,26 @@ The script uses ZFS user properties for configuration. These should be set on th
 | :--- | :--- | :--- |
 | `repl:chain` | **(Required)** Comma-separated list of hostnames in order. | `node1,node2,node3` |
 | `repl:<hostname>` | Physical pool name for a specific host. | `repl:node1=tank` |
-| `repl:<label>` | Comma-separated retention (keep counts) for each node. | `repl:min1=10,30,90` |
+| `repl:keep:<label>:<role>` | Role-based retention (roles: `master`, `middle`, `sink`). | `repl:keep:min1:sink=90` |
+| `repl:keep:<label>:<hostname>` | Host-specific retention (highest priority). | `repl:keep:min1:node1=30` |
+| `repl:<label>` | (Legacy) Comma-separated retention for each node. | `10,30,90` |
 | `repl:user` | SSH user for replication (default: `root`). | `root` |
-| `repl:timeout` | Seconds before a job is considered stuck (default: `3600`). | `7200` |
-| `repl:suspend` | Globally pause replication if set to `true`. | `false` |
-| `repl:smtp_host` | SMTP server for alerts. | `smtp.example.com` |
-| `repl:smtp_port` | SMTP port (default: `465`). | `465` |
-| `repl:smtp_to` | Destination email for alerts. | `admin@example.com` |
+
+### Retention Resolution Hierarchy
+When the script runs, it determines the "keep count" using this priority:
+1. `repl:keep:<label>:<hostname>` (Host-specific)
+2. `repl:keep:<label>:<role>` (Role-specific based on chain position)
+3. `repl:<label>` (Positional legacy list)
+4. Command line fallback argument.
+
+This ensures your retention policies are robust even if you promote nodes or reorder the chain.
 
 ### Pool Name Resolution
 To allow uniform commands across nodes, the script maps logical paths to physical pools:
 1. It looks for `repl:<hostname>` on the dataset.
 2. If not found, it checks for a pool named `pool`.
 3. Fallback: `$(hostname)-pool`.
+
 
 ## Usage
 

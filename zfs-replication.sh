@@ -47,6 +47,42 @@ resolve_node_pool() {
     echo "$pool"
 }
 
+# Resolve retention (keep count) for the current node
+resolve_retention() {
+    local ds=$1
+    local lbl=$2
+    local fallback=$3
+    local role="middle"
+    
+    [[ $ME_INDEX -eq 0 ]] && role="master"
+    [[ $ME_INDEX -eq $((${#nodes[@]} - 1)) ]] && role="sink"
+    
+    local val=""
+    
+    # 1. Host-specific: repl:keep:<label>:<hostname>
+    val=$(get_zfs_prop "repl:keep:${lbl}:${ME}" "$ds")
+    
+    # 2. Role-specific: repl:keep:<label>:<master|middle|sink>
+    [[ -z "$val" ]] && val=$(get_zfs_prop "repl:keep:${lbl}:${role}" "$ds")
+    
+    # 3. Positional (Legacy): repl:<label>
+    if [[ -z "$val" ]]; then
+        local positional=$(get_zfs_prop "repl:${lbl}" "$ds")
+        if [[ -n "$positional" ]]; then
+            IFS=',' read -r -a k_values <<< "$positional"
+            # Ensure the index exists in the array
+            if [[ -n "${k_values[$ME_INDEX]}" ]]; then
+                val="${k_values[$ME_INDEX]}"
+            fi
+        fi
+    fi
+    
+    # 4. Final Fallback
+    [[ -z "$val" ]] && val="$fallback"
+    
+    echo "$val"
+}
+
 find_best_donor() {
     local target_node=$1
     local ds_raw=$2
@@ -806,14 +842,8 @@ if [[ -n "$REPL_CHAIN" ]]; then
     [[ $ME_INDEX -eq -1 ]] && die "ERR: Host $ME is not part of the replication chain for $local_ds"
     
     # Resolve Graduated Retention
-    REPL_KEEP_PROP=$(get_zfs_prop "repl:$label" "$local_ds")
-    if [[ -n "$REPL_KEEP_PROP" ]]; then
-        IFS=',' read -r -a k_values <<< "$REPL_KEEP_PROP"
-        if [[ -n "${k_values[$ME_INDEX]}" ]]; then
-            RESOLVED_KEEP=${k_values[$ME_INDEX]}
-            echo "INFO: Using dynamic retention for $label: $RESOLVED_KEEP (Node Index: $ME_INDEX)"
-        fi
-    fi
+    RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+    echo "INFO: Using dynamic retention for $label: $RESOLVED_KEEP (Role: $( [[ $ME_INDEX -eq 0 ]] && echo "master" || ( [[ $ME_INDEX -eq $((${#nodes[@]}-1)) ]] && echo "sink" || echo "middle" ) ))"
 fi
 
 if [[ -n "$TARGET_NODE" ]]; then
