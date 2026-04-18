@@ -70,59 +70,76 @@ The script uses a namespaced configuration system. This allows you to use short 
    - Command line fallback argument.
 
 
-## Usage
+## Local Cluster Test Bench (for Development)
 
-### Basic Replication
-Use a generic pool name; the script resolves it locally via `repl:node:<alias>:fs`.
+For streamlined development and testing, you can simulate a multi-node ZFS replication chain on a single host using aliases and `localhost`.
+
+### Setup Steps
+
+1.  **Prepare Host Environment**:
+    Ensure `zfs-auto-snapshot`, `mbuffer`, `zstd`, `curl`, and `openssh-server`/`client` are installed on your host machine. Configure passwordless SSH to `localhost`.
+    ```bash
+    sudo apt-get update && sudo apt-get install -y zfs-auto-snapshot mbuffer zstd curl openssh-server openssh-client
+    mkdir -p ~/.ssh
+    [[ -f ~/.ssh/id_ed25519 ]] || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+    cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+    chmod 600 ~/.ssh/authorized_keys
+    ssh-keyscan -H localhost >> ~/.ssh/known_hosts
+    ```
+
+2.  **Create Local Zpools (File-backed)**:
+    Create three file-backed ZFS pools on your host. These will act as `local1`, `local2`, and `local3`.
+    ```bash
+    for i in 1 2 3; do
+        truncate -s 1G "test_node${i}.img"
+        sudo zpool create -f "local${i}" "$(pwd)/test_node${i}.img"
+    done
+    ```
+
+3.  **Configure Master Dataset Properties**:
+    Create a master dataset (e.g., `local1/data`) and configure it with the `repl:chain` and node-specific properties. All aliases (`node1`, `node2`, `node3`) will point to `localhost`.
+    ```bash
+    sudo zfs create local1/data
+    sudo zfs set repl:chain=node1,node2,node3 local1/data
+    sudo zfs set repl:node:node1:fqdn=localhost repl:node:node1:fs=local1 local1/data
+    sudo zfs set repl:node:node2:fqdn=localhost repl:node:node2:fs=local2 local1/data
+    sudo zfs set repl:node:node3:fqdn=localhost repl:node:node3:fs=local3 local1/data
+    sudo zfs set repl:role:master:keep:min1=10 repl:role:middle:keep:min1=30 repl:role:sink:keep:min1=90 local1/data
+    ```
+
+### Running Tests
+
+To simulate running the script as `node1`, `node2`, or `node3`, use the `REPL_ME` environment variable:
+
+*   **As Node1 (Master)**:
+    ```bash
+    REPL_ME=node1 ./zfs-replication.sh local1/data min1 10 --initial
+    # Subsequent runs
+    REPL_ME=node1 ./zfs-replication.sh local1/data min1 10
+    ```
+
+*   **As Node2 (Middle)**:
+    ```bash
+    REPL_ME=node2 ./zfs-replication.sh local2/data min1 10
+    ```
+
+*   **As Node3 (Sink)**:
+    ```bash
+    REPL_ME=node3 ./zfs-replication.sh local3/data min1 10
+    ```
+
+This setup allows for rapid iteration and debugging of complex replication scenarios on a single machine.
+
+### Cleanup
+
+To destroy the local test pools and image files:
 ```bash
-zfs-replication.sh pool/mydata min1 10
+for i in 1 2 3; do
+    sudo zpool destroy "local${i}"
+    rm "test_node${i}.img"
+done
 ```
 
-### Initial Replication
-For the first run (no common snapshots downstream):
-```bash
-zfs-replication.sh pool/mydata min1 10 --initial
-```
-
-### Master Promotion & Recovery
-Promotion reorders the `repl:chain` and propagates it. The script uses **Snapshot GUIDs** to ensure consistent ancestry during recovery.
-
-1. **Auto-Discovery (Recommended)**:
-   Find the latest snapshot shared by all nodes (matching name AND GUID) and rollback:
-   ```bash
-   zfs-replication.sh pool/mydata min1 10 --promote --auto [-y]
-   ```
-
-
-2. **Specific Snapshot**:
-   Rollback the entire chain to a specific known-good snapshot:
-   ```bash
-   zfs-replication.sh pool/mydata min1 10 --promote --snap <snapshot_name> [-y]
-   ```
-
-3. **Brutal Startover (Dangerous)**:
-   Destroy the dataset on all downstream nodes and perform a fresh full send:
-   ```bash
-   zfs-replication.sh pool/mydata min1 10 --promote --destroy-chain
-   ```
-
-### Pause & Resume
-To globally pause the Master's replication schedule:
-```bash
-zfs-replication.sh pool/mydata min1 10 --suspend
-```
-To resume:
-```bash
-zfs-replication.sh pool/mydata min1 10 --resume
-```
-This sets/unsets the `repl:suspend=true` property on all nodes in the chain.
-
-## Cron Integration
-
-Add the same cron job to **all nodes**. Only the current Master will act; others will exit gracefully.
-```cron
-* * * * * root /usr/local/bin/zfs-replication.sh pool/mydata min1 10 >> /var/log/zfs-replication.log 2>&1
-```
 
 ## Gotchas & Lessons Learned
 

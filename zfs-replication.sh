@@ -439,7 +439,7 @@ purge_shipped_snapshots() {
     done
 }
 
-check_stuck_job() {
+# check_stuck_job() {
     # Locking is ONLY for Master-initiated scheduled runs.
     # Other modes (Cascaded, Promote, Donor, Target-specific) bypass to avoid deadlocks.
     if [[ "$CASCADED" == true || "$PROMOTE" == true || "$IS_DONOR" == true || -n "$TARGET_NODE" ]]; then
@@ -484,17 +484,26 @@ raw_dataset=$1
 label=${2:-"frequently"}
 keep_fallback=${3:-"10"}
 [[ -n "$raw_dataset" ]] || die "dataset not specified"
-ME=$(hostname)
+ME=${REPL_ME:-$(hostname)}
 ds_name="${raw_dataset#*/}"
 
 # 1. Resolve local pool
 configured_pool=$(zfs get -H -o value "repl:node:${ME}:fs" "$raw_dataset" 2>/dev/null | grep -v "^-$")
 if [[ -z "$configured_pool" ]]; then
-    if zfs list pool >/dev/null 2>&1; then configured_pool="pool"; else configured_pool="${ME}-pool"; fi
+    # If ME is an alias in the chain but doesn't have repl:node:ME:fs, fallback to generic pool or ME-pool
+    if [[ -n "$REPL_CHAIN" ]]; then
+        IFS=',' read -r -a all_aliases <<< "$REPL_CHAIN"
+        for alias_in_chain in "${all_aliases[@]}"; do
+            if [[ "$alias_in_chain" == "$ME" ]]; then
+                if zfs list pool >/dev/null 2>&1; then configured_pool="pool"; else configured_pool="${ME}-pool"; fi
+                break
+            fi
+        done
+    fi
+    [[ -z "$configured_pool" ]] && configured_pool="${ME}-pool" # Final fallback if ME not in chain or no generic pool
 fi
 local_ds="${configured_pool}/${ds_name}"
 dataset=$local_ds
-
 # 2. Chain & Role Discovery
 REPL_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
 REPL_USER=$(get_zfs_prop "repl:user" "$local_ds")
@@ -615,7 +624,7 @@ if [[ "$MARK_ONLY" == true ]]; then
     exit 0
 fi
 
-check_stuck_job
+# check_stuck_job
 
 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
     k_flag=$(cat /var/run/keep-$label.txt 2> /dev/null); [[ -z "$k_flag" ]] && k_flag=999
