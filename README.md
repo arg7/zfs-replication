@@ -13,6 +13,8 @@ A robust, cascading ZFS replication script designed for multi-node chains. It ha
 - **Robust Transfers**: Uses `zfsbud` logic with `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
 - **Graduated Retention**: Different retention policies (keep counts) for each node in the chain.
 - **Skip-Hop Resiliency**: If a downstream node is offline, the script automatically skips it and attempts to replicate to the next node in the chain to ensure data flow continues.
+- **Peer-to-Peer Healing**: If a node lacks a common snapshot with its target, it automatically searches the chain for a "Donor" node (like a Sink) to delegate a peer-to-peer transfer.
+- **Divergence Detection**: Before performing a forced rollback or receive, the script uses `zfs diff` to identify and log local changes made on the destination since the last sync.
 - **Pre-flight Health Checks**: Performs quick connectivity tests before starting transfers to avoid long timeouts.
 - **Transfer Timeouts**: Prevents replication from hanging indefinitely during ZFS send/receive operations.
 - **SMTP Alerts**: Sends email notifications for critical failures, stuck jobs, role changes, and suspend/resume actions.
