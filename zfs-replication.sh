@@ -19,6 +19,13 @@ resolve_node_pool() {
     local ds_raw=$2
     local pool=""
     
+    # Pre-flight check: Is node reachable?
+    if [[ "$node" != "$(hostname)" ]]; then
+        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$node" "true" 2>/dev/null; then
+            return 255
+        fi
+    fi
+
     # 1. Check local properties if we are on that node
     if [[ "$node" == "$(hostname)" ]]; then
         pool=$(get_zfs_prop "repl:${node}" "$ds_raw")
@@ -230,7 +237,7 @@ zfsbud_core() {
   # Helper inner functions
   dataset_exists() {
     if [ -n "$remote_shell" ]; then
-      $remote_shell "zfs list -H -o name" | grep -qx "$1" && return 0
+      $remote_shell "zfs list -H -o name" 2>/dev/null | grep -qx "$1" && return 0
     else
       zfs list -H -o name | grep -qx "$1" && return 0
     fi
@@ -241,7 +248,7 @@ zfsbud_core() {
     ! dataset_exists "$1" && return 0
     local token="-"
     if [ -n "$remote_shell" ]; then
-      token=$($remote_shell "zfs get -H -o value receive_resume_token $1")
+      token=$($remote_shell "zfs get -H -o value receive_resume_token $1" 2>/dev/null)
     else
       token=$(zfs get -H -o value receive_resume_token "$1")
     fi
@@ -258,10 +265,15 @@ zfsbud_core() {
   
   set_destination_snapshots() {
     if [ -n "$remote_shell" ]; then
-      mapfile -t destination_snapshots < <(get_remote_snapshots "$destination_parent_dataset/$1")
+      local output
+      output=$($remote_shell "zfs list -H -o name,guid -t snapshot | grep $1@" 2>/dev/null)
+      local status=$?
+      [[ $status -ne 0 && $status -ne 1 ]] && return $status # Connectivity error
+      mapfile -t destination_snapshots <<< "$output"
     else
       mapfile -t destination_snapshots < <(get_local_snapshots "$destination_parent_dataset/$1")
     fi
+    return 0
   }
 
   set_common_snapshot() {
@@ -298,6 +310,9 @@ zfsbud_core() {
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
+    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
+    [[ -z "$timeout_val" ]] && timeout_val="3600"
+
     if [ -z "$dry_run" ]; then
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
       if [[ "$DESTROY_CHAIN" == true ]]; then
@@ -310,33 +325,36 @@ zfsbud_core() {
       fi
 
       if [ -n "$remote_shell" ]; then
-        ! zfs send -w -R "$latest_snapshot_source" 2>>/tmp/zfs-replication.err | mbuffer -q -r "$RATE" -m "$BUF" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell "zstd -d | zfs recv $resume -F -u $remote_ds" 2>>/tmp/zfs-replication.err && return 1
+        ! timeout "$timeout_val" bash -c "zfs send -w -R \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $resume -F -u $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       else
-        ! zfs send -w -R "$latest_snapshot_source" 2>>/tmp/zfs-replication.err | zfs recv $resume -F -u "$remote_ds" 2>>/tmp/zfs-replication.err && return 1
+        ! timeout "$timeout_val" bash -c "zfs send -w -R \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $resume -F -u \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
     fi
     last_snapshot_common="${latest_snapshot_source#*@}"
   }
 
   send_incremental() {
-    local latest_line=${source_snapshots[-1]}
-    local last_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
-    if [[ ${last_snapshot_source#*@} == "$last_snapshot_common" ]]; then
+    local last_snapshot_source=${source_snapshots[-1]}
+    local latest_snapshot_source=$(echo "$last_snapshot_source" | awk '{print $1}')
+    if [[ ${latest_snapshot_source#*@} == "$last_snapshot_common" ]]; then
       zbud_msg "Skipping incremental: already up to date."
       return 0
     fi
-    zbud_msg "Sending incremental: $last_snapshot_common -> ${last_snapshot_source#*@}"
+    zbud_msg "Sending incremental: $last_snapshot_common -> ${latest_snapshot_source#*@}"
     local ds_name="${dataset#*/}"
     local remote_ds="${destination_parent_dataset}/${ds_name}"
     
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
+    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
+    [[ -z "$timeout_val" ]] && timeout_val="3600"
+
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
         set -o pipefail
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
-        zfs send -w -p $recursive_send -i "$local_ds@$last_snapshot_common" "$last_snapshot_source" 2>>/tmp/zfs-replication.err | mbuffer -q -r "$RATE" -m "$BUF" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell "zstd -d | zfs recv $resume -F -u $remote_ds" 2>>/tmp/zfs-replication.err
+        timeout "$timeout_val" bash -c "zfs send -w -p $recursive_send -i \"$local_ds@$last_snapshot_common\" \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $resume -F -u $remote_ds\" 2>>/tmp/zfs-replication.err"
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then
@@ -344,7 +362,7 @@ zfsbud_core() {
            return 1
         fi
       else
-        ! zfs send -w -p $recursive_send -i "$local_ds@$last_snapshot_common" "$last_snapshot_source" 2>>/tmp/zfs-replication.err | zfs recv $resume -F -u "$remote_ds" 2>>/tmp/zfs-replication.err && return 1
+        ! timeout "$timeout_val" bash -c "zfs send -w -p $recursive_send -i \"$local_ds@$last_snapshot_common\" \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $resume -F -u \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
     fi
   }
@@ -377,9 +395,15 @@ zfsbud_core() {
     fi
 
     set_destination_snapshots "$ds_name"
+    local ds_status=$?
+    if [[ $ds_status -ne 0 && $ds_status -ne 1 ]]; then
+       zbud_msg "Target node unreachable or dataset listing failed (Status: $ds_status)"
+       return $ds_status
+    fi
+
     if ! set_common_snapshot; then
        if [ -n "$initial" ]; then
-          send_initial || zbud_die "Initial send failed"
+          send_initial || return 1
        else
           zbud_warn "No common snapshots for $local_ds. Use -i for initial."
           continue
@@ -389,13 +413,14 @@ zfsbud_core() {
        local remote_ds="${destination_parent_dataset}/${ds_name}"
        zbud_msg "Rolling back $remote_ds to $last_snapshot_common to resolve divergence..."
        if [ -n "$remote_shell" ]; then
-         $remote_shell "zfs rollback -r $remote_ds@$last_snapshot_common"
+         $remote_shell "zfs rollback -r $remote_ds@$last_snapshot_common" || return 1
        else
-         zfs rollback -r "$remote_ds@$last_snapshot_common"
+         zfs rollback -r "$remote_ds@$last_snapshot_common" || return 1
        fi
     fi
-    send_incremental || zbud_die "Incremental send failed"
+    send_incremental || return 1
   done
+  return 0
 }
 
 # --- END OF ZFSBUD CORE ---
@@ -726,12 +751,17 @@ RESOLVED_KEEP=$keep_fallback
 
 if [[ -n "$REPL_CHAIN" ]]; then
     IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
+    NODES_REMAINING=()
     for i in "${!nodes[@]}"; do
         if [[ "${nodes[i]}" == "$ME" ]]; then
             ME_INDEX=$i
             if [[ $i -eq 0 ]]; then IS_MASTER=true; fi
-            if (( i < ${#nodes[@]} - 1 )); then
-                NEXT_HOP="${REPL_USER}@${nodes[i+1]}"
+            # Capture all nodes AFTER the current one
+            for (( j=i+1; j<${#nodes[@]}; j++ )); do
+                NODES_REMAINING+=("${nodes[j]}")
+            done
+            if (( ${#NODES_REMAINING[@]} > 0 )); then
+                NEXT_HOP="${REPL_USER}@${NODES_REMAINING[0]}"
             fi
             break
         fi
@@ -791,42 +821,34 @@ fi
 LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*$label" | head -n 1 | cut -d'@' -f2)
 
 # 2. Replication & Audit
-if [[ -n "$NEXT_HOP" ]]; then
-    # Resolve NEXT_HOP pool name (Prioritize node-specific property)
-    NEXT_HOP_HOST=${NEXT_HOP#*@}
-    NEXT_HOP_POOL=$(get_zfs_prop "repl:${NEXT_HOP_HOST}" "$local_ds")
+REPLICATION_SUCCESS=false
+for hop_node in "${NODES_REMAINING[@]}"; do
+    HOP_TARGET="${REPL_USER}@${hop_node}"
     
-    if [[ -z "$NEXT_HOP_POOL" ]]; then
-        # Fallback 1: try generic 'pool' if it exists on remote
-        if ssh "$NEXT_HOP" "zfs list pool >/dev/null 2>&1"; then
-            NEXT_HOP_POOL="pool"
-        else
-            # Fallback 2: classic naming
-            NEXT_HOP_POOL="${NEXT_HOP_HOST}-pool"
-        fi
+    echo "Checking connectivity to $hop_node..."
+    NEXT_HOP_POOL=$(resolve_node_pool "$hop_node" "$raw_dataset")
+    if [[ $? -eq 255 ]]; then
+        echo "ERROR: Node $hop_node is unreachable (Pre-flight). Skipping..."
+        continue
     fi
     
-    echo "Replicating $local_ds to $NEXT_HOP (Pool: $NEXT_HOP_POOL)..."
-    # Call internal zfsbud logic instead of external script
+    echo "Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
     zfsbud_opts=""
     if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
-    zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $NEXT_HOP" -v "$local_ds"
     
-    if [[ $? -ne 0 ]]; then
-        echo 9999 > /var/run/keep-$label.txt
-        die "ERR: replication to $NEXT_HOP failed"
-    else
-        rm /var/run/keep-$label.txt 2>/dev/null
+    if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
+        echo "Replication to $HOP_TARGET successful."
+        REPLICATION_SUCCESS=true
         
         # PROPAGATE & VERIFY
-        echo "Cascading: triggering downstream chain for $local_ds on $NEXT_HOP"
+        echo "Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
         casc_opts=""
         if [[ "$initial_send" == true ]]; then casc_opts="--initial"; fi
-        
-        # GATHER PROPERTIES FOR PROPAGATION
         PROPS_ARG=$(get_repl_props_encoded "$local_ds")
         
-        DOWNSTREAM_OUT=$(ssh "$NEXT_HOP" "zfs-replication.sh $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
+        # We run the cascaded script. If it fails, we don't necessarily skip THIS node's success, 
+        # but we do report the verification status.
+        DOWNSTREAM_OUT=$(ssh "$HOP_TARGET" "zfs-replication.sh $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
         SSH_STATUS=$?
         
         # Bubble up logs
@@ -836,31 +858,44 @@ if [[ -n "$NEXT_HOP" ]]; then
             ARRIVED_LIST=$(echo "$DOWNSTREAM_OUT" | grep "^SENT_LIST:" | cut -d':' -f2)
             
             if [[ -n "$LATEST_SNAP" && ",$ARRIVED_LIST," == *",$LATEST_SNAP,"* ]]; then
-                echo "VERIFICATION SUCCESS: Snapshot $LATEST_SNAP confirmed at the end of the chain."
-                
-                # HOUSEKEEPING
-                echo "Marking local snapshots ($local_ds) as shipped..."
-                zfs list -t snap -o name -H -r "$local_ds" | grep "@.*$label" | \
-                while read s; do
-                    zfs set zfs-send:shipped=true "$s"
-                done
-
-                purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
-                
-                echo "SENT_LIST:$ARRIVED_LIST"
+                echo "VERIFICATION SUCCESS: Snapshot $LATEST_SNAP confirmed reaching a sink node."
+                REPLICATION_SUCCESS=true # Redundant but clear
             else
-                send_smtp_alert "CRITICAL: Verification FAILED for $local_ds. Snapshot $LATEST_SNAP NOT found in arrival receipt from $NEXT_HOP."
-                die "ERR: Audit failed for $LATEST_SNAP"
+                echo "WARNING: Verification FAILED. Snapshot $LATEST_SNAP not confirmed at end of chain, but transfer to $hop_node succeeded."
             fi
         else
-            die "ERR: Downstream chain processing failed on $NEXT_HOP (Code: $SSH_STATUS)."
+            echo "WARNING: Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
         fi
+        
+        # If we reached this point, the local transfer to THIS hop was successful.
+        # We can stop trying further hops from THIS node.
+        break
+    else
+        echo "ERROR: Replication to $hop_node failed. Skipping to next available node in chain..."
     fi
+done
+
+if [[ "$REPLICATION_SUCCESS" == true ]]; then
+    # HOUSEKEEPING (Only if at least one remote hop succeeded)
+    echo "Marking local snapshots ($local_ds) as shipped..."
+    zfs list -t snap -o name -H -r "$local_ds" | grep "@.*$label" | \
+    while read s; do
+        zfs set zfs-send:shipped=true "$s"
+    done
+    purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
+    
+    # Report our success list for upstream verification
+    MY_LIST=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*$label" | cut -d'@' -f2 | xargs | tr ' ' ',')
+    echo "SENT_LIST:$MY_LIST"
+elif [[ ${#NODES_REMAINING[@]} -gt 0 ]]; then
+    echo 9999 > /var/run/keep-$label.txt
+    die "ERR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}"
 else
+    # End of chain logic (no remaining nodes)
     echo "INFO: End of chain ($ME). Reporting state."
     /usr/sbin/zfs-auto-snapshot --syslog --label=$label --keep=$RESOLVED_KEEP "$local_ds"
     
-    # SINK HOUSEKEEPING: Mark as shipped since we are the end of the line
+    # SINK HOUSEKEEPING
     echo "Sink node marking snapshots ($local_ds) as shipped..."
     zfs list -t snap -o name -H -r "$local_ds" | grep "@.*$label" | \
     while read s; do

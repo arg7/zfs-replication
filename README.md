@@ -12,6 +12,9 @@ A robust, cascading ZFS replication script designed for multi-node chains. It ha
 - **Cron Safety**: The script can be configured in cron on **all nodes**. Only the current Master will initiate replication.
 - **Robust Transfers**: Uses `zfsbud` logic with `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
 - **Graduated Retention**: Different retention policies (keep counts) for each node in the chain.
+- **Skip-Hop Resiliency**: If a downstream node is offline, the script automatically skips it and attempts to replicate to the next node in the chain to ensure data flow continues.
+- **Pre-flight Health Checks**: Performs quick connectivity tests before starting transfers to avoid long timeouts.
+- **Transfer Timeouts**: Prevents replication from hanging indefinitely during ZFS send/receive operations.
 - **SMTP Alerts**: Sends email notifications for critical failures, stuck jobs, role changes, and suspend/resume actions.
 
 ## Dependencies
