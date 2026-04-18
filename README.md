@@ -52,8 +52,8 @@ The script uses ZFS user properties for configuration. These should be set on th
 | `repl:node:<alias>:fs` | Physical pool name for a specific host alias. | `repl:node:node1:fs=tank` |
 | `repl:node:<alias>:fqdn` | Real address/FQDN for a host alias. | `repl:node:node1:fqdn=10.0.0.5` |
 | `repl:node:<alias>:user` | SSH user for a host alias. | `repl:node:node1:user=repluser` |
-| `repl:keep:<label>:<role>` | Role-based retention (roles: `master`, `middle`, `sink`). | `repl:keep:min1:sink=90` |
-| `repl:keep:<label>:<hostname>` | Host-specific retention (highest priority). | `repl:keep:min1:node1=30` |
+| `repl:node:<alias>:keep:<label>` | Host-specific retention (highest priority). | `repl:node:node1:keep:min1=30` |
+| `repl:role:<role>:keep:<label>` | Role-based retention (roles: `master`, `middle`, `sink`). | `repl:role:sink:keep:min1=90` |
 | `repl:user` | **(Global)** Fallback SSH user for replication. | `root` |
 
 ### Node Configuration & Aliases
@@ -62,8 +62,10 @@ The script uses a namespaced configuration system. This allows you to use short 
 2. **FQDN**: Looks for `repl:node:<alias>:fqdn`, defaults to alias.
 3. **User**: Looks for `repl:node:<alias>:user`, defaults to global `repl:user`, then `root`.
 4. **Pool/FS**: Looks for `repl:node:<alias>:fs`, defaults to `pool`, then `$(alias)-pool`.
-
-This architecture prevents property collisions and makes the chain easy to reorder or migrate.
+5. **Retention**: Determining the "keep count" follows this priority:
+   - `repl:node:<alias>:keep:<label>` (Host-specific)
+   - `repl:role:<role>:keep:<label>` (Role-specific based on chain position)
+   - Command line fallback argument.
 
 
 ## Usage

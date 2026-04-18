@@ -84,11 +84,11 @@ resolve_retention() {
     
     local val=""
     
-    # 1. Host-specific: repl:keep:<label>:<hostname>
-    val=$(get_zfs_prop "repl:keep:${lbl}:${ME}" "$ds")
+    # 1. Host-specific: repl:node:<alias>:keep:<label>
+    val=$(get_zfs_prop "repl:node:${ME}:keep:${lbl}" "$ds")
     
-    # 2. Role-specific: repl:keep:<label>:<master|middle|sink>
-    [[ -z "$val" ]] && val=$(get_zfs_prop "repl:keep:${lbl}:${role}" "$ds")
+    # 2. Role-specific: repl:role:<role>:keep:<label>
+    [[ -z "$val" ]] && val=$(get_zfs_prop "repl:role:${role}:keep:${lbl}" "$ds")
     
     # 3. Final Fallback
     [[ -z "$val" ]] && val="$fallback"
