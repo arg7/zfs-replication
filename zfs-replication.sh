@@ -13,6 +13,33 @@ get_zfs_prop() {
     zfs get -H -o value "$prop" "$ds" 2>/dev/null | grep -v "^-$" | head -n 1
 }
 
+# Resolve pool for a specific node
+resolve_node_pool() {
+    local node=$1
+    local ds_raw=$2
+    local pool=""
+    
+    # 1. Check local properties if we are on that node
+    if [[ "$node" == "$(hostname)" ]]; then
+        pool=$(get_zfs_prop "repl:${node}" "$ds_raw")
+        [[ -z "$pool" ]] && pool=$(get_zfs_prop "repl:${node}" "${node}-pool/${ds_raw#*/}")
+    else
+        # 2. Check property via SSH
+        pool=$(ssh "$node" "zfs get -H -o value repl:${node} ${node}-pool/${ds_raw#*/} 2>/dev/null | grep -v '^-$'")
+    fi
+    
+    if [[ -z "$pool" ]]; then
+        # Fallback 1: try generic 'pool'
+        if ssh "$node" "zfs list pool >/dev/null 2>&1"; then
+            pool="pool"
+        else
+            # Fallback 2: classic naming
+            pool="${node}-pool"
+        fi
+    fi
+    echo "$pool"
+}
+
 send_smtp_alert() {
     local msg=$1
     local host=$(get_zfs_prop "repl:smtp_host" "$dataset")
@@ -221,10 +248,11 @@ zfsbud_core() {
     [[ $token ]] && [[ $token != "-" ]] && resume_token=$token
   }
 
-  get_local_snapshots() { zfs list -H -o name -t snapshot | grep "$1@"; }
-  get_remote_snapshots() { $remote_shell "zfs list -H -o name -t snapshot | grep $1@"; }
+  get_local_snapshots() { zfs list -H -o name,guid -t snapshot | grep "$1@"; }
+  get_remote_snapshots() { $remote_shell "zfs list -H -o name,guid -t snapshot | grep $1@"; }
   
   set_source_snapshots() {
+    # format: dataset@name<tab>guid
     mapfile -t source_snapshots < <(get_local_snapshots "$1")
   }
   
@@ -240,11 +268,17 @@ zfsbud_core() {
     last_snapshot_common=""
     # Iterate through destination snapshots in reverse (newest first)
     for (( i=${#destination_snapshots[@]}-1; i>=0; i-- )); do
-      dest_snap="${destination_snapshots[$i]}"
+      dest_line="${destination_snapshots[$i]}"
+      dest_snap=$(echo "$dest_line" | awk '{print $1}')
+      dest_guid=$(echo "$dest_line" | awk '{print $2}')
       dest_label="${dest_snap#*@}"
-      for source_snap in "${source_snapshots[@]}"; do
-        if [[ "${source_snap#*@}" == "$dest_label" ]]; then
-           last_snapshot_common="$dest_label"
+      
+      for source_line in "${source_snapshots[@]}"; do
+        source_snap=$(echo "$source_line" | awk '{print $1}')
+        source_guid=$(echo "$source_line" | awk '{print $2}')
+        if [[ "$source_guid" == "$dest_guid" ]]; then
+           last_snapshot_common="${source_snap#*@}"
+           zbud_msg "Found common snapshot by GUID: $last_snapshot_common (GUID: $source_guid)"
            return 0
         fi
       done
@@ -253,7 +287,8 @@ zfsbud_core() {
   }
 
   send_initial() {
-    local latest_snapshot_source=${source_snapshots[-1]}
+    local latest_line=${source_snapshots[-1]}
+    local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
     zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
     zbud_msg "Sending initial snapshot to destination..."
     # Map any source pool/dataset to destination_pool/dataset
@@ -261,8 +296,7 @@ zfsbud_core() {
     local remote_ds="${destination_parent_dataset}/${ds_name}"
     
     # Identify LOCAL dataset to send from
-    local my_hostname=$(hostname)
-    local local_ds="${my_hostname}-pool/${ds_name}"
+    local local_ds="$dataset"
 
     if [ -z "$dry_run" ]; then
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
@@ -285,7 +319,8 @@ zfsbud_core() {
   }
 
   send_incremental() {
-    local last_snapshot_source=${source_snapshots[-1]}
+    local latest_line=${source_snapshots[-1]}
+    local last_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
     if [[ ${last_snapshot_source#*@} == "$last_snapshot_common" ]]; then
       zbud_msg "Skipping incremental: already up to date."
       return 0
@@ -295,8 +330,7 @@ zfsbud_core() {
     local remote_ds="${destination_parent_dataset}/${ds_name}"
     
     # Identify LOCAL dataset to send from
-    local my_hostname=$(hostname)
-    local local_ds="${my_hostname}-pool/${ds_name}"
+    local local_ds="$dataset"
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
@@ -318,8 +352,7 @@ zfsbud_core() {
   # Simplified processing for zfs-replication.sh context
   for dataset in "${datasets[@]}"; do
     ds_name="${dataset#*/}"
-    my_hostname=$(hostname)
-    local_ds="${my_hostname}-pool/${ds_name}"
+    local_ds="$dataset"
     
     zbud_msg "Processing $local_ds -> ${destination_parent_dataset} (Target: ${destination_parent_dataset}/${ds_name})"
     
@@ -471,7 +504,15 @@ keep_fallback=${3:-"10"}
 # Early local dataset resolution
 ds_name="${raw_dataset#*/}"
 my_hostname=$(hostname)
-local_ds="${my_hostname}-pool/${ds_name}"
+
+# Resolve local pool name from node-specific property (e.g., repl:node1=node1-pool)
+configured_pool=$(get_zfs_prop "repl:${my_hostname}" "$raw_dataset")
+if [[ -n "$configured_pool" ]]; then
+    local_ds="${configured_pool}/${ds_name}"
+else
+    # Fallback to legacy naming
+    local_ds="${my_hostname}-pool/${ds_name}"
+fi
 dataset=$local_ds # Ensure helper functions use the local path
 
 MARK_ONLY=false
@@ -568,27 +609,62 @@ if [[ "$PROMOTE" == true ]]; then
         TARGET_SNAP=""
         if [[ -n "$PROMOTE_SNAP" ]]; then
             TARGET_SNAP="$PROMOTE_SNAP"
-            echo "Checking if snapshot $TARGET_SNAP exists on all nodes..."
-        else
-            echo "Auto-discovering latest common snapshot across the chain..."
-            # Gather snapshots from all nodes
-            declare -A snap_counts
-            total_nodes=${#NEW_NODES[@]}
+            echo "Checking if snapshot $TARGET_SNAP exists on all nodes and has consistent GUID..."
+            
+            # Gather GUID for this snap from all nodes
+            declare -A snap_guids
             for n in "${NEW_NODES[@]}"; do
-                echo "  Querying $n..."
-                node_snaps=$(ssh "$n" "zfs list -t snap -H -o name -r ${n}-pool/${ds_name}" 2>/dev/null | cut -d'@' -f2)
-                for s in $node_snaps; do
-                    ((snap_counts["$s"]++))
-                done
+                echo "  Querying $n for GUID of $TARGET_SNAP..."
+                local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+                g=$(ssh "$n" "zfs get -H -o value guid ${local_pool}/${ds_name}@$TARGET_SNAP" 2>/dev/null)
+                if [[ -z "$g" || "$g" == "-" ]]; then
+                    die "ERR: Snapshot @$TARGET_SNAP not found on $n"
+                fi
+                snap_guids["$n"]=$g
             done
-            # Find latest (highest count and newest by name)
-            for s in $(echo "${!snap_counts[@]}" | tr ' ' '\n' | sort -r); do
-                if [[ ${snap_counts[$s]} -eq $total_nodes ]]; then
-                    TARGET_SNAP="$s"
-                    echo "Found latest common snapshot: $TARGET_SNAP"
-                    break
+            
+            # Verify consistency
+            f_node="${NEW_NODES[0]}"
+            ref_guid=${snap_guids[$f_node]}
+            for n in "${NEW_NODES[@]}"; do
+                if [[ "${snap_guids[$n]}" != "$ref_guid" ]]; then
+                    die "ERR: Snapshot @$TARGET_SNAP exists on all nodes but GUIDs mismatch! ($f_node: $ref_guid vs $n: ${snap_guids[$n]}). The chain has diverged."
                 fi
             done
+            echo "Snapshot @$TARGET_SNAP is consistent across all nodes (GUID: $ref_guid)."
+        else
+            echo "Auto-discovering latest common snapshot across the chain (using GUIDs)..."
+            # Gather snapshots (name and guid) from all nodes
+            # We'll use a temporary file to store the common candidates
+            tmp_common="/tmp/zfs-common-snaps.$$"
+            f_node_flag=true
+            
+            for n in "${NEW_NODES[@]}"; do
+                echo "  Querying $n..."
+                local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+
+                if [[ "$f_node_flag" == true ]]; then
+                    ssh "$n" "zfs list -t snap -H -o name,guid -r ${local_pool}/${ds_name}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$tmp_common"
+                    f_node_flag=false
+                else
+                    node_tmp="/tmp/zfs-node-snaps.$$"
+                    ssh "$n" "zfs list -t snap -H -o name,guid -r ${local_pool}/${ds_name}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$node_tmp"
+                    # Intersect current common with this node's snaps (match both name and guid)
+                    grep -Fxf "$tmp_common" "$node_tmp" > "${tmp_common}.new"
+                    mv "${tmp_common}.new" "$tmp_common"
+                    rm -f "$node_tmp"
+                fi
+                [[ ! -s "$tmp_common" ]] && break
+            done
+
+            if [[ -s "$tmp_common" ]]; then
+                # Get the latest one (bottom of the file, assuming zfs list order)
+                latest_line=$(tail -n 1 "$tmp_common")
+                TARGET_SNAP=$(echo "$latest_line" | awk '{print $1}')
+                target_guid=$(echo "$latest_line" | awk '{print $2}')
+                echo "Found latest common snapshot: $TARGET_SNAP (GUID: $target_guid)"
+            fi
+            rm -f "$tmp_common"
         fi
 
         # SAFETY CHECK for --destroy-chain
@@ -616,7 +692,8 @@ if [[ "$PROMOTE" == true ]]; then
             # 4. Execute Rollbacks
             for n in "${NEW_NODES[@]}"; do
                 echo "Rolling back $n to $TARGET_SNAP..."
-                ssh "$n" "zfs rollback -r ${n}-pool/${ds_name}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
+                local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+                ssh "$n" "zfs rollback -r ${local_pool}/${ds_name}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
             done
             echo "Chain successfully consistent at @$TARGET_SNAP"
         fi
@@ -715,9 +792,19 @@ LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*
 
 # 2. Replication & Audit
 if [[ -n "$NEXT_HOP" ]]; then
-    # Resolve NEXT_HOP pool name (node2 -> node2-pool)
+    # Resolve NEXT_HOP pool name (Prioritize node-specific property)
     NEXT_HOP_HOST=${NEXT_HOP#*@}
-    NEXT_HOP_POOL="${NEXT_HOP_HOST}-pool"
+    NEXT_HOP_POOL=$(get_zfs_prop "repl:${NEXT_HOP_HOST}" "$local_ds")
+    
+    if [[ -z "$NEXT_HOP_POOL" ]]; then
+        # Fallback 1: try generic 'pool' if it exists on remote
+        if ssh "$NEXT_HOP" "zfs list pool >/dev/null 2>&1"; then
+            NEXT_HOP_POOL="pool"
+        else
+            # Fallback 2: classic naming
+            NEXT_HOP_POOL="${NEXT_HOP_HOST}-pool"
+        fi
+    fi
     
     echo "Replicating $local_ds to $NEXT_HOP (Pool: $NEXT_HOP_POOL)..."
     # Call internal zfsbud logic instead of external script
