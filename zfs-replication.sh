@@ -344,14 +344,15 @@ zfsbud_core() {
   }
   
   set_destination_snapshots() {
+    local target_ds="$1"
     if [ -n "$remote_shell" ]; then
       local output
-      output=$($remote_shell "zfs list -H -o name,guid -t snapshot | grep $1@" 2>/dev/null)
+      output=$($remote_shell "zfs list -H -o name,guid -t snapshot -r $target_ds 2>/dev/null" | awk '{print $1" "$2}')
       local status=$?
       [[ $status -ne 0 && $status -ne 1 ]] && return $status # Connectivity error
       mapfile -t destination_snapshots <<< "$output"
     else
-      mapfile -t destination_snapshots < <(get_local_snapshots "$destination_parent_dataset/$1")
+      mapfile -t destination_snapshots < <(get_local_snapshots "$target_ds")
     fi
     return 0
   }
@@ -363,11 +364,15 @@ zfsbud_core() {
       dest_line="${destination_snapshots[$i]}"
       dest_snap=$(echo "$dest_line" | awk '{print $1}')
       dest_guid=$(echo "$dest_line" | awk '{print $2}')
-      dest_label="${dest_snap#*@}"
+      
+      [[ -z "$dest_guid" || "$dest_guid" == "-" ]] && continue
       
       for source_line in "${source_snapshots[@]}"; do
         source_snap=$(echo "$source_line" | awk '{print $1}')
         source_guid=$(echo "$source_line" | awk '{print $2}')
+        
+        [[ -z "$source_guid" || "$source_guid" == "-" ]] && continue
+        
         if [[ "$source_guid" == "$dest_guid" ]]; then
            last_snapshot_common="${source_snap#*@}"
            zbud_msg "Found common snapshot by GUID: $last_snapshot_common (GUID: $source_guid)"
@@ -381,17 +386,15 @@ zfsbud_core() {
   send_initial() {
     local latest_line=${source_snapshots[-1]}
     local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
+    local remote_ds="$1"
     zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
-    zbud_msg "Sending initial snapshot to destination..."
-    # Map any source pool/dataset to destination_pool/dataset
-    local ds_name="${dataset#*/}"
-    local remote_ds="${destination_parent_dataset}/${ds_name}"
+    zbud_msg "Sending initial snapshot to destination $remote_ds..."
     
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
     local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" ]] && timeout_val="3600"
+    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
 
     if [ -z "$dry_run" ]; then
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
@@ -416,19 +419,18 @@ zfsbud_core() {
   send_incremental() {
     local last_snapshot_source=${source_snapshots[-1]}
     local latest_snapshot_source=$(echo "$last_snapshot_source" | awk '{print $1}')
+    local remote_ds="$1"
     if [[ ${latest_snapshot_source#*@} == "$last_snapshot_common" ]]; then
       zbud_msg "Skipping incremental: already up to date."
       return 0
     fi
-    zbud_msg "Sending incremental: $last_snapshot_common -> ${latest_snapshot_source#*@}"
-    local ds_name="${dataset#*/}"
-    local remote_ds="${destination_parent_dataset}/${ds_name}"
+    zbud_msg "Sending incremental: $last_snapshot_common -> ${latest_snapshot_source#*@} to $remote_ds"
     
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
     local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" ]] && timeout_val="3600"
+    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
@@ -451,8 +453,16 @@ zfsbud_core() {
   for dataset in "${datasets[@]}"; do
     ds_name="${dataset#*/}"
     local_ds="$dataset"
+    local remote_ds=""
+
+    # If destination_parent_dataset is already a full path (contains /), use it as the exact target
+    if [[ "$destination_parent_dataset" == *"/"* ]]; then
+        remote_ds="$destination_parent_dataset"
+    else
+        remote_ds="${destination_parent_dataset}/${ds_name}"
+    fi
     
-    zbud_msg "Processing $local_ds -> ${destination_parent_dataset} (Target: ${destination_parent_dataset}/${ds_name})"
+    zbud_msg "Processing $local_ds -> ${destination_parent_dataset} (Target: ${remote_ds})"
     
     set_source_snapshots "$local_ds"
     if ((${#source_snapshots[@]} < 1)); then
@@ -460,21 +470,20 @@ zfsbud_core() {
        continue
     fi
 
-    local remote_ds="${destination_parent_dataset}/${ds_name}"
     set_resume_token "$remote_ds"
     
     if [ -n "$resume_token" ]; then
        # Resume logic simplified
        if [ -z "$dry_run" ]; then
          if [ -n "$remote_shell" ]; then
-           zfs send -w $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u ${destination_parent_dataset}"
+           zfs send -w $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume -F -u ${remote_ds}"
          else
-           zfs send -w $verbose -t "$resume_token" | zfs recv $resume -F -u "${destination_parent_dataset}"
+           zfs send -w $verbose -t "$resume_token" | zfs recv $resume -F -u "${remote_ds}"
          fi
        fi
     fi
 
-    set_destination_snapshots "$ds_name"
+    set_destination_snapshots "$remote_ds"
     local ds_status=$?
     if [[ $ds_status -ne 0 && $ds_status -ne 1 ]]; then
        zbud_msg "Target node unreachable or dataset listing failed (Status: $ds_status)"
@@ -483,22 +492,21 @@ zfsbud_core() {
 
     if ! set_common_snapshot; then
        if [ -n "$initial" ]; then
-          send_initial || return 1
+          send_initial "$remote_ds" || return 1
        else
           zbud_warn "No common snapshots for $local_ds. Use -i for initial."
           continue
        fi
     else
        # RESOLVE DIVERGENCE: Rollback receiver to the common snapshot
-       local remote_ds="${destination_parent_dataset}/${ds_name}"
        zbud_msg "Rolling back $remote_ds to $last_snapshot_common to resolve divergence..."
        if [ -n "$remote_shell" ]; then
          $remote_shell "zfs rollback -r $remote_ds@$last_snapshot_common" || return 1
        else
          zfs rollback -r "$remote_ds@$last_snapshot_common" || return 1
        fi
+       send_incremental "$remote_ds" || return 1
     fi
-    send_incremental || return 1
   done
   return 0
 }
@@ -607,16 +615,28 @@ label=${2:-"frequently"}
 keep_fallback=${3:-"10"}
 
 # Early local dataset resolution
-ds_name="${raw_dataset#*/}"
 my_hostname=$(hostname)
 
-# Resolve local pool name from node-specific property (e.g., repl:node1=node1-pool)
-configured_pool=$(get_zfs_prop "repl:${my_hostname}" "$raw_dataset")
-if [[ -n "$configured_pool" ]]; then
-    local_ds="${configured_pool}/${ds_name}"
+# Resolve local pool name from node-specific property (e.g., repl:node:node1:fs=node1-pool/data1)
+# We try to get it from the dataset passed as argument
+configured_ds=$(get_zfs_prop "repl:node:${my_hostname}:fs" "$raw_dataset")
+
+if [[ -n "$configured_ds" && "$configured_ds" != "-" ]]; then
+    local_ds="$configured_ds"
 else
-    # Fallback to legacy naming
-    local_ds="${my_hostname}-pool/${ds_name}"
+    # Fallback to legacy or simple pool/ds resolution
+    ds_name="${raw_dataset#*/}"
+    configured_pool=$(get_zfs_prop "repl:node:${my_hostname}:fs" "$raw_dataset")
+    if [[ -n "$configured_pool" && "$configured_pool" != "-" ]]; then
+        if [[ "$configured_pool" == *"/"* ]]; then
+            local_ds="$configured_pool"
+        else
+            local_ds="${configured_pool}/${ds_name}"
+        fi
+    else
+        # Last resort fallback
+        local_ds="${my_hostname}-pool/${ds_name}"
+    fi
 fi
 dataset=$local_ds # Ensure helper functions use the local path
 
@@ -676,9 +696,9 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
 
     IFS=',' read -r -a nodes <<< "$CURRENT_CHAIN"
     for n in "${nodes[@]}"; do
-        local n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
-        local n_user=$(resolve_node_user "$n" "$local_ds")
-        local n_pool=$(resolve_node_pool "$n" "$local_ds")
+n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
+n_user=$(resolve_node_user "$n" "$local_ds")
+n_pool=$(resolve_node_pool "$n" "$local_ds")
         
         echo "  Setting repl:suspend=$VAL on $n ($n_fqdn)..."
         ssh "${n_user}@${n_fqdn}" "zfs set repl:suspend=$VAL ${n_pool}/${ds_name}" || echo "  Warning: Failed to set property on $n"
@@ -728,9 +748,9 @@ if [[ "$PROMOTE" == true ]]; then
             declare -A snap_guids
             for n in "${NEW_NODES[@]}"; do
                 echo "  Querying $n for GUID of $TARGET_SNAP..."
-                local local_pool=$(resolve_node_pool "$n" "$raw_dataset")
-                local local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
-                local local_user=$(resolve_node_user "$n" "$raw_dataset")
+local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
+local_user=$(resolve_node_user "$n" "$raw_dataset")
                 g=$(ssh "${local_user}@${local_fqdn}" "zfs get -H -o value guid ${local_pool}/${ds_name}@$TARGET_SNAP" 2>/dev/null)
                 if [[ -z "$g" || "$g" == "-" ]]; then
                     die "ERR: Snapshot @$TARGET_SNAP not found on $n"
@@ -756,10 +776,10 @@ if [[ "$PROMOTE" == true ]]; then
             
             for n in "${NEW_NODES[@]}"; do
                 echo "  Querying $n..."
-                local local_pool=$(resolve_node_pool "$n" "$raw_dataset")
-                local local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
-                local local_user=$(resolve_node_user "$n" "$raw_dataset")
-                local node_target="${local_user}@${local_fqdn}"
+local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
+local_user=$(resolve_node_user "$n" "$raw_dataset")
+node_target="${local_user}@${local_fqdn}"
 
                 if [[ "$f_node_flag" == true ]]; then
                     ssh "$node_target" "zfs list -t snap -H -o name,guid -r ${local_pool}/${ds_name}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$tmp_common"
@@ -810,9 +830,9 @@ if [[ "$PROMOTE" == true ]]; then
             # 4. Execute Rollbacks
             for n in "${NEW_NODES[@]}"; do
                 echo "Rolling back $n to $TARGET_SNAP..."
-                local local_pool=$(resolve_node_pool "$n" "$raw_dataset")
-                local local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
-                local local_user=$(resolve_node_user "$n" "$raw_dataset")
+local_pool=$(resolve_node_pool "$n" "$raw_dataset")
+local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
+local_user=$(resolve_node_user "$n" "$raw_dataset")
                 ssh "${local_user}@${local_fqdn}" "zfs rollback -r ${local_pool}/${ds_name}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
             done
             echo "Chain successfully consistent at @$TARGET_SNAP"
@@ -922,8 +942,8 @@ LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*
 # 2. Replication & Audit
 REPLICATION_SUCCESS=false
 for hop_node in "${NODES_REMAINING[@]}"; do
-    local hop_fqdn=$(resolve_node_fqdn "$hop_node" "$raw_dataset")
-    local hop_user=$(resolve_node_user "$hop_node" "$raw_dataset")
+    hop_fqdn=$(resolve_node_fqdn "$hop_node" "$raw_dataset")
+    hop_user=$(resolve_node_user "$hop_node" "$raw_dataset")
     HOP_TARGET="${hop_user}@${hop_fqdn}"
     
     echo "Checking connectivity to $hop_node ($hop_fqdn)..."
@@ -947,9 +967,9 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         echo "WARNING: Local replication to $hop_node failed. Searching chain for a better donor..."
         DONOR_NODE=$(find_best_donor "$hop_node" "$raw_dataset")
         if [[ -n "$DONOR_NODE" ]]; then
-            local donor_fqdn=$(resolve_node_fqdn "$DONOR_NODE" "$raw_dataset")
-            local donor_user=$(resolve_node_user "$DONOR_NODE" "$raw_dataset")
-            local donor_target="${donor_user}@${donor_fqdn}"
+donor_fqdn=$(resolve_node_fqdn "$DONOR_NODE" "$raw_dataset")
+donor_user=$(resolve_node_user "$DONOR_NODE" "$raw_dataset")
+donor_target="${donor_user}@${donor_fqdn}"
 
             echo "SUCCESS: Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
             # Run the script on the donor to push to the target
