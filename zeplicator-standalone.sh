@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 12:35:11 PM CEST 2026
+# Built on: Mon Apr 20 02:15:13 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -119,25 +119,14 @@ indent_output() {
 }
 
 die() {
-    zbud_msg "❌ ERROR: $*"
+    local msg="$*"
+    zbud_msg "❌ ERROR: $msg"
 
     if [[ -n "$dataset" ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then
-            send_smtp_alert "ERROR in ZFSBUD: $*"
-        fi
-    fi
-    echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
-    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
-    echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
-    echo "  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
-    exit 1
-}
-
-die() {
-    echo "$@"
-    if [[ -n "$dataset" ]]; then
-        if type send_smtp_alert >/dev/null 2>&1; then
-            send_smtp_alert "ERROR: $*"
+            # We don't want to infinite loop if send_smtp_alert calls die
+            # But here we just call it once.
+            send_smtp_alert "ERROR: $msg"
         fi
     fi
     echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
@@ -725,6 +714,8 @@ PROMOTE_SNAP=""
 sync_props_data=""
 TARGET_NODE=""
 IS_DONOR=false
+CONFIG_MODE=false
+config_args=()
 
 # Parse arguments
 positional_args=()
@@ -743,6 +734,17 @@ while [[ $# -gt 0 ]]; do
         --sync-props) sync_props_data="$2"; shift 2 ;;
         --target) TARGET_NODE="$2"; shift 2 ;;
         --donor) IS_DONOR=true; shift ;;
+        --config) 
+            CONFIG_MODE=true
+            shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --list|--clear|--export|--import) config_args+=("$1"); shift ;;
+                    -*) break ;; # Next main flag
+                    *) config_args+=("$1"); shift ;;
+                esac
+            done
+            ;;
         -*) echo "Unknown flag: $1"; shift ;; # Ignore unknown flags
         *) positional_args+=("$1"); shift ;; # Collect positional arguments
     esac
@@ -779,6 +781,97 @@ else
     fi
 fi
 dataset=$local_ds # Ensure helper functions use the local path
+
+# Handle Configuration logic
+handle_config() {
+    local args=("$@")
+    if [[ ${#args[@]} -eq 0 || "${args[0]}" == "--list" ]]; then
+        echo "  📋 Current Configuration for $dataset:"
+        zfs get all -H -o property,value "$dataset" | grep "^repl:" | sed 's/^repl://' | sort | awk -F'\t' '{ printf "      %-30s %s\n", $1, $2 }'
+        return
+    fi
+
+    local i=0
+    while [[ $i -lt ${#args[@]} ]]; do
+        local arg="${args[i]}"
+        
+        if [[ "$arg" == "--export" ]]; then
+            local fname="${args[((i+1))]}"
+            [[ -z "$fname" || "$fname" == -* ]] && die "Missing filename for --export"
+            
+            echo "  💾 Exporting configuration to $fname..."
+            zfs get all -H -o property,value "$dataset" | grep "^repl:" | awk '{print $1"="$2}' > "$fname"
+            i=$((i + 2))
+            continue
+        fi
+
+        if [[ "$arg" == "--import" ]]; then
+            local fname="${args[((i+1))]}"
+            [[ -z "$fname" || ! -f "$fname" ]] && die "Missing or invalid filename for --import"
+            
+            echo "  📥 Importing configuration from $fname..."
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                # Trim whitespaces
+                line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [[ -z "$line" || "$line" == \#* ]] && continue
+                
+                if [[ "$line" == *"="* ]]; then
+                    local key="${line%%=*}"
+                    local val="${line#*=}"
+                    
+                    if [[ "$key" != repl:* ]]; then
+                        if [[ "$key" == smtp:* ]]; then
+                            key="repl:smtp_${key#*:}"
+                        else
+                            key="repl:$key"
+                        fi
+                    fi
+                    
+                    echo "  ⚙️  Setting $key=$val on $dataset"
+                    zfs set "$key=$val" "$dataset" || echo "    ⚠️  Failed to set $key"
+                fi
+            done < "$fname"
+            i=$((i + 2))
+            continue
+        fi
+
+        if [[ "$arg" == "--clear" ]]; then
+            local key="${args[((i+1))]}"
+            [[ -z "$key" ]] && die "Missing property key to clear"
+            
+            # Shorthand mapping
+            local full_key="repl:$key"
+            if [[ "$key" == smtp:* ]]; then full_key="repl:smtp_${key#*:}"; fi
+
+            echo "  ⚙️  Clearing $full_key from $dataset..."
+            zfs inherit "$full_key" "$dataset" || echo "    ⚠️  Failed to clear $full_key"
+            i=$((i + 2))
+            continue
+        fi
+
+        if [[ "$arg" == *"="* ]]; then
+            local key="${arg%%=*}"
+            local val="${arg#*=}"
+            
+            # Shorthand mapping
+            local full_key="repl:$key"
+            if [[ "$key" == smtp:* ]]; then
+                full_key="repl:smtp_${key#*:}";
+            fi
+            
+            echo "  ⚙️  Setting $full_key=$val on $dataset"
+            zfs set "$full_key"="$val" "$dataset" || echo "    ⚠️  Failed to set $full_key"
+        else
+            echo "  ⚠️  Ignoring invalid config argument: $arg (Expected key=value)"
+        fi
+        i=$((i + 1))
+    done
+}
+
+if [[ "$CONFIG_MODE" == true ]]; then
+    handle_config "${config_args[@]}"
+    exit 0
+fi
 
 # Handle Suspend/Resume logic
 if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then

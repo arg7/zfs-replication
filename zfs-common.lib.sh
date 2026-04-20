@@ -115,25 +115,14 @@ indent_output() {
 }
 
 die() {
-    zbud_msg "❌ ERROR: $*"
+    local msg="$*"
+    zbud_msg "❌ ERROR: $msg"
 
     if [[ -n "$dataset" ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then
-            send_smtp_alert "ERROR in ZFSBUD: $*"
-        fi
-    fi
-    echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
-    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
-    echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
-    echo "  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
-    exit 1
-}
-
-die() {
-    echo "$@"
-    if [[ -n "$dataset" ]]; then
-        if type send_smtp_alert >/dev/null 2>&1; then
-            send_smtp_alert "ERROR: $*"
+            # We don't want to infinite loop if send_smtp_alert calls die
+            # But here we just call it once.
+            send_smtp_alert "ERROR: $msg"
         fi
     fi
     echo "HINT: If replication failed due to divergent snapshots, try recovery options:"

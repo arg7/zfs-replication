@@ -55,6 +55,34 @@ The following packages must be installed on all nodes:
 | `repl:role:<role>:keep:<label>` | Role-based retention (`master`, `middle`, `sink`). | `repl:role:sink:keep:min1=90` |
 | `repl:user` | **(Global)** Fallback SSH user. | `root` |
 
+### Configuration Management (`--config`)
+
+Zeplicator provides a built-in `--config` sub-command to manage `repl:*` properties on your datasets easily, including shorthand support for common properties (`smtp:`, `node:`, `role:`).
+
+**List configuration:**
+```bash
+zeplicator pool/mydata --config --list
+```
+
+**Set properties (supports shorthand):**
+```bash
+zeplicator pool/mydata --config smtp:host=smtp.example.com role:sink:keep:min1=90
+```
+
+**Clear a property:**
+```bash
+zeplicator pool/mydata --config --clear smtp:port
+```
+
+**Export & Import configurations:**
+```bash
+# Backup configuration to a file
+zeplicator pool/mydata --config --export /tmp/config.txt
+
+# Import configuration from a file (supports shorthand in the file)
+zeplicator pool/mydata --config --import /tmp/config.txt
+```
+
 ## Usage
 
 ### Basic Replication
