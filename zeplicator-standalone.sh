@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 10:21:12 AM CEST 2026
+# Built on: Mon Apr 20 10:38:36 AM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -100,6 +100,10 @@ apply_repl_props() {
 
 zbud_msg() { echo "    $*" 1>&2; }
 zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
+
+indent_output() {
+    sed 's/^/        /'
+}
 
 die() {
     zbud_msg "❌ ERROR: $*"
@@ -928,8 +932,8 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
     [[ -z "$k_flag" ]] && k_flag=999
     
     echo "  ⏳ Creating snapshot for $local_ds (label: $label)..."
-    /usr/sbin/zfs-auto-snapshot --syslog --label=$label --keep=$k_flag "$local_ds"
-    [[ $? -eq 0 ]] || die "ERR: snapshot creation failed"
+    /usr/sbin/zfs-auto-snapshot --syslog --label=$label --keep=$k_flag "$local_ds" 2>&1 | indent_output
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
 else
     if [[ "$IS_DONOR" == true ]]; then
         echo "  ℹ️  Node $ME is acting as Donor. Skipping snapshot creation."

@@ -301,8 +301,8 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
     [[ -z "$k_flag" ]] && k_flag=999
     
     echo "  ⏳ Creating snapshot for $local_ds (label: $label)..."
-    /usr/sbin/zfs-auto-snapshot --syslog --label=$label --keep=$k_flag "$local_ds"
-    [[ $? -eq 0 ]] || die "ERR: snapshot creation failed"
+    /usr/sbin/zfs-auto-snapshot --syslog --label=$label --keep=$k_flag "$local_ds" 2>&1 | indent_output
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
 else
     if [[ "$IS_DONOR" == true ]]; then
         echo "  ℹ️  Node $ME is acting as Donor. Skipping snapshot creation."

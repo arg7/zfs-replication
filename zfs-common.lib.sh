@@ -97,6 +97,10 @@ apply_repl_props() {
 zbud_msg() { echo "    $*" 1>&2; }
 zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
 
+indent_output() {
+    sed 's/^/        /'
+}
+
 die() {
     zbud_msg "❌ ERROR: $*"
 
