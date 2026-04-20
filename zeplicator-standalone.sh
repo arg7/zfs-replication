@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 03:17:48 PM CEST 2026
+# Built on: Mon Apr 20 03:22:31 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -447,7 +447,7 @@ find_best_donor() {
         
         # Check if donor has snapshots and shares GUID with target
         if ssh "$donor_target" "zfs list -t snap -H -r ${donor_pool}/${ds_raw#*/} >/dev/null 2>&1"; then
-            if ssh "$donor_target" "/scripts/zeplicator $ds_raw $label 0 --target $target_node --donor >/dev/null 2>&1"; then
+            if ssh "$donor_target" "/scripts/zeplicator $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
                 echo "$donor_alias"
                 return 0
             fi
@@ -1211,7 +1211,7 @@ for hop_node in "${NODES_REMAINING[@]}"; do
             donor_target="${donor_user}@${donor_fqdn}"
 
             echo "${CHAIN_PREFIX}  ✅ SUCCESS: Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
-            if ssh "$donor_target" "/scripts/zeplicator $raw_dataset $label $keep_fallback --target $hop_node --donor"; then
+            if ssh "$donor_target" "/scripts/zeplicator $raw_dataset $label $keep_fallback --alias $DONOR_NODE --target $hop_node --donor"; then
                 echo "${CHAIN_PREFIX}  ✅ Delegated replication from $DONOR_NODE to $hop_node successful."
                 TRANSFER_DONE=true
             else
@@ -1230,8 +1230,8 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         fi
         
         echo "${CHAIN_PREFIX}  🔗 Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
-        casc_opts=""
-        if [[ "$initial_send" == true ]]; then casc_opts="--initial"; fi
+        casc_opts="--alias $hop_node"
+        if [[ "$initial_send" == true ]]; then casc_opts+=" --initial"; fi
         PROPS_ARG=$(get_repl_props_encoded "$local_ds")
         
         # We pass the prefix to maintain the visual tree across SSH hops
