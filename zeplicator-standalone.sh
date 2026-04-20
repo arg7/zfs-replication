@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 02:15:13 PM CEST 2026
+# Built on: Mon Apr 20 03:17:48 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -10,6 +10,61 @@ get_zfs_prop() {
     local prop=$1
     local ds=$2
     zfs get -H -o value "$prop" "$ds" 2>/dev/null | grep -v "^-$" | head -n 1
+}
+
+# Get the local node alias (using cli override, hostname in chain, fqdn match, or hostname as fallback)
+get_local_alias() {
+    local raw_ds="$1"
+    local cli_alias="$2"
+
+    # 1. Check if CLI alias is provided (Overrides all auto-discovery)
+    if [[ -n "$cli_alias" ]]; then
+        echo "$cli_alias"
+        return 0
+    fi
+
+    local sys_host=$(hostname)
+    
+    # Try to read the chain from the dataset
+    local chain=$(get_zfs_prop "repl:chain" "$raw_ds")
+    
+    if [[ -z "$chain" ]]; then
+        # Cannot read chain, fallback to hostname
+        echo "$sys_host"
+        return 0
+    fi
+
+    IFS=',' read -r -a nodes <<< "$chain"
+
+    # 2. Does hostname directly match an alias in the chain?
+    for n in "${nodes[@]}"; do
+        if [[ "$n" == "$sys_host" ]]; then
+            echo "$sys_host"
+            return 0
+        fi
+    done
+
+    # 3. Does any node's FQDN resolve to one of our local IPs?
+    local local_ips=$(hostname -I 2>/dev/null || ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    for n in "${nodes[@]}"; do
+        local n_fqdn=$(get_zfs_prop "repl:node:${n}:fqdn" "$raw_ds")
+        if [[ -n "$n_fqdn" && "$n_fqdn" != "-" ]]; then
+            # Direct string match with local IPs
+            if echo "$local_ips" | grep -qw "$n_fqdn"; then
+                echo "$n"
+                return 0
+            fi
+            # DNS Resolution match
+            local resolved_ip=$(getent hosts "$n_fqdn" 2>/dev/null | awk '{print $1}' | head -n 1)
+            if [[ -n "$resolved_ip" ]] && echo "$local_ips" | grep -qw "$resolved_ip"; then
+                echo "$n"
+                return 0
+            fi
+        fi
+    done
+
+    # 4. Fallback to system hostname
+    echo "$sys_host"
 }
 
 # Resolve FQDN/Address for a specific node alias
@@ -36,7 +91,7 @@ resolve_node_pool() {
     local alias=$1
     local ds_raw=$2
     local pool=""
-    local my_alias=$(hostname) # Assuming hostname matches the alias in the chain
+    local my_alias=$(get_local_alias "$ds_raw" "") # Rely on auto-discovery here if ME is not in scope
     
     # Pre-flight check: Is node reachable?
     if [[ "$alias" != "$my_alias" ]]; then
@@ -279,7 +334,7 @@ send_smtp_alert() {
          --upload-file - <<EOF
 From: $from
 To: $to
-Subject: ZFS Replication Alert: $dataset on $(hostname)
+Subject: ZFS Replication Alert: $dataset on ${ME:-${my_hostname:-$(hostname)}}
 Date: $(date -R)
 
 $msg
@@ -717,10 +772,13 @@ IS_DONOR=false
 CONFIG_MODE=false
 config_args=()
 
+CLI_ALIAS=""
+
 # Parse arguments
 positional_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --alias) CLI_ALIAS="$2"; shift 2 ;;
         --mark-only) MARK_ONLY=true; shift ;;
         --initial) initial_send=true; shift ;;
         --promote) PROMOTE=true; shift ;;
@@ -758,7 +816,7 @@ if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}
 [[ -n "$raw_dataset" ]] || die "dataset not specified"
 
 # Early local dataset resolution
-my_hostname=$(hostname)
+my_hostname=$(get_local_alias "$raw_dataset" "$CLI_ALIAS")
 
 # Resolve local pool name from node-specific property (e.g., repl:node:node1:fs=node1-pool/data1)
 configured_ds=$(get_zfs_prop "repl:node:${my_hostname}:fs" "$raw_dataset")
@@ -899,7 +957,7 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
         ssh "${n_user}@${n_fqdn}" "zfs set repl:suspend=$VAL ${n_pool}/${ds_name}" || echo "  Warning: Failed to set property on $n"
     done
     
-    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $(hostname). Master node: ${nodes[0]}. New state: repl:suspend=$VAL"
+    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $my_hostname. Master node: ${nodes[0]}. New state: repl:suspend=$VAL"
     exit 0
 fi
 
@@ -1032,7 +1090,7 @@ REPL_USER=$(get_zfs_prop "repl:user" "$local_ds")
 [[ -z "$REPL_USER" ]] && REPL_USER="root"
 
 [[ -n "$raw_dataset" ]] || die "dataset not specified"
-ME=$(hostname)
+ME=$(get_local_alias "$local_ds" "$CLI_ALIAS")
 NEXT_HOP=""
 IS_MASTER=false
 ME_INDEX=-1

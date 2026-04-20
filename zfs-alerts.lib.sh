@@ -70,7 +70,7 @@ send_smtp_alert() {
          --upload-file - <<EOF
 From: $from
 To: $to
-Subject: ZFS Replication Alert: $dataset on $(hostname)
+Subject: ZFS Replication Alert: $dataset on ${ME:-${my_hostname:-$(hostname)}}
 Date: $(date -R)
 
 $msg

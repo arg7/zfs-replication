@@ -217,7 +217,7 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
         ssh "${n_user}@${n_fqdn}" "zfs set repl:suspend=$VAL ${n_pool}/${ds_name}" || echo "  Warning: Failed to set property on $n"
     done
     
-    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $(hostname). Master node: ${nodes[0]}. New state: repl:suspend=$VAL"
+    send_smtp_alert "NOTICE: ZFS Replication has been ${ACTION} for dataset $raw_dataset on $my_hostname. Master node: ${nodes[0]}. New state: repl:suspend=$VAL"
     exit 0
 fi
 
