@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 03:22:31 PM CEST 2026
+# Built on: Mon Apr 20 03:29:56 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -447,7 +447,7 @@ find_best_donor() {
         
         # Check if donor has snapshots and shares GUID with target
         if ssh "$donor_target" "zfs list -t snap -H -r ${donor_pool}/${ds_raw#*/} >/dev/null 2>&1"; then
-            if ssh "$donor_target" "/scripts/zeplicator $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
+            if ssh "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
                 echo "$donor_alias"
                 return 0
             fi
@@ -744,10 +744,11 @@ zfsbud_core() {
 
 # --- BEGIN zeplicator orchestrator ---
 
-# /scripts/zeplicator - Modular ZFS Replication Manager
+# zeplicator - Modular ZFS Replication Manager
 # Main orchestrator script
 
-LIB_DIR=$(dirname "$(readlink -f "$0")")
+ZEPLICATOR_CMD="$(readlink -f "$0")"
+LIB_DIR=$(dirname "$ZEPLICATOR_CMD")
 
 # Phase 1: Source library modules
 
@@ -1211,7 +1212,7 @@ for hop_node in "${NODES_REMAINING[@]}"; do
             donor_target="${donor_user}@${donor_fqdn}"
 
             echo "${CHAIN_PREFIX}  ✅ SUCCESS: Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
-            if ssh "$donor_target" "/scripts/zeplicator $raw_dataset $label $keep_fallback --alias $DONOR_NODE --target $hop_node --donor"; then
+            if ssh "$donor_target" "$ZEPLICATOR_CMD $raw_dataset $label $keep_fallback --alias $DONOR_NODE --target $hop_node --donor"; then
                 echo "${CHAIN_PREFIX}  ✅ Delegated replication from $DONOR_NODE to $hop_node successful."
                 TRANSFER_DONE=true
             else
@@ -1235,7 +1236,7 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         PROPS_ARG=$(get_repl_props_encoded "$local_ds")
         
         # We pass the prefix to maintain the visual tree across SSH hops
-        DOWNSTREAM_OUT=$(ssh "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; /scripts/zeplicator $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
+        DOWNSTREAM_OUT=$(ssh "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
         SSH_STATUS=$?
         
         echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"

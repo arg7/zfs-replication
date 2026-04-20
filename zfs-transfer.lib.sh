@@ -27,7 +27,7 @@ find_best_donor() {
         
         # Check if donor has snapshots and shares GUID with target
         if ssh "$donor_target" "zfs list -t snap -H -r ${donor_pool}/${ds_raw#*/} >/dev/null 2>&1"; then
-            if ssh "$donor_target" "/scripts/zeplicator $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
+            if ssh "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
                 echo "$donor_alias"
                 return 0
             fi
