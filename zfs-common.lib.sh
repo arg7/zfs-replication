@@ -79,7 +79,7 @@ apply_repl_props() {
     local encoded=$2
     [[ -z "$encoded" ]] && return
     
-    echo "Syncing replication properties for $ds..."
+    echo "${CHAIN_PREFIX}  ⚙️  Syncing replication properties for $ds..."
     local decoded=$(echo -n "$encoded" | base64 -d)
     IFS=';' read -ra props <<< "$decoded"
     for p in "${props[@]}"; do
@@ -94,11 +94,11 @@ apply_repl_props() {
     done
 }
 
-zbud_msg() { echo "    $*" 1>&2; }
+zbud_msg() { echo "${CHAIN_PREFIX}    $*" 1>&2; }
 zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
 
 indent_output() {
-    sed 's/^/        /'
+    sed "s/^/${CHAIN_PREFIX}        /"
 }
 
 die() {
