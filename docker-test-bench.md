@@ -56,8 +56,25 @@ for i in {1..3}; do
   docker exec node${i} apt update
   docker exec node${i} apt install -y zfsutils-linux openssh-server openssh-client mbuffer zstd curl iproute2
 done
+
+# 6. Configure SSH Full Mesh Connectivity
+# Generate keys, start SSH service, and distribute keys across all nodes
+for i in {1..3}; do
+  docker exec node${i} bash -c 'ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa'
+  docker exec node${i} bash -c 'mkdir -p /run/sshd && /usr/sbin/sshd'
+  docker exec node${i} bash -c 'echo "StrictHostKeyChecking no" >> ~/.ssh/config && chmod 600 ~/.ssh/config'
+done
+
+# Distribute keys to build the mesh
+for i in {1..3}; do
+  PUB_KEY=$(docker exec node${i} cat /root/.ssh/id_rsa.pub)
+  for j in {1..3}; do
+    docker exec node${j} bash -c "echo '$PUB_KEY' >> ~/.ssh/authorized_keys"
+  done
+done
 ```
-*Note: You will still need to manually configure SSH inside the containers to establish full mesh passwordless connectivity between `node1`, `node2`, and `node3`, and set the `repl:*` ZFS properties.*
+
+*Note: You will still need to set the `repl:*` ZFS properties on the datasets to configure the chain.*
 
 ### Data Load (IO Simulation)
 A background process on `node1` provides constant incremental changes:
