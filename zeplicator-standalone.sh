@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 11:12:30 AM CEST 2026
+# Built on: Mon Apr 20 11:31:57 AM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -655,10 +655,53 @@ LIB_DIR=$(dirname "$(readlink -f "$0")")
 
 # Phase 1: Source library modules
 
-# Params
-raw_dataset=$1
-label=${2:-"frequently"}
-keep_fallback=${3:-"10"}
+# Initialize default variables
+raw_dataset=""
+label="frequently"
+keep_fallback="10"
+
+MARK_ONLY=false
+initial_send=false
+PROMOTE=false
+CASCADED=false
+SUSPEND=false
+RESUME=false
+AUTO=false
+DESTROY_CHAIN=false
+YES=false
+PROMOTE_SNAP=""
+sync_props_data=""
+TARGET_NODE=""
+IS_DONOR=false
+
+# Parse arguments
+positional_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mark-only) MARK_ONLY=true; shift ;;
+        --initial) initial_send=true; shift ;;
+        --promote) PROMOTE=true; shift ;;
+        --suspend) SUSPEND=true; shift ;;
+        --resume) RESUME=true; shift ;;
+        --cascaded) CASCADED=true; shift ;;
+        --auto) AUTO=true; shift ;;
+        --destroy-chain) DESTROY_CHAIN=true; shift ;;
+        -y) YES=true; shift ;;
+        --snap) PROMOTE_SNAP="$2"; shift 2 ;;
+        --sync-props) sync_props_data="$2"; shift 2 ;;
+        --target) TARGET_NODE="$2"; shift 2 ;;
+        --donor) IS_DONOR=true; shift ;;
+        -*) echo "Unknown flag: $1"; shift ;; # Ignore unknown flags
+        *) positional_args+=("$1"); shift ;; # Collect positional arguments
+    esac
+done
+
+# Assign positional arguments
+if [[ ${#positional_args[@]} -gt 0 ]]; then raw_dataset="${positional_args[0]}"; fi
+if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
+if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
+
+[[ -n "$raw_dataset" ]] || die "dataset not specified"
 
 # Early local dataset resolution
 my_hostname=$(hostname)
@@ -684,41 +727,6 @@ else
     fi
 fi
 dataset=$local_ds # Ensure helper functions use the local path
-
-MARK_ONLY=false
-initial_send=false
-PROMOTE=false
-CASCADED=false
-SUSPEND=false
-RESUME=false
-AUTO=false
-DESTROY_CHAIN=false
-YES=false
-PROMOTE_SNAP=""
-sync_props_data=""
-TARGET_NODE=""
-IS_DONOR=false
-
-# Parse additional flags
-shift 3
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --mark-only) MARK_ONLY=true; shift ;;
-        --initial) initial_send=true; shift ;;
-        --promote) PROMOTE=true; shift ;;
-        --suspend) SUSPEND=true; shift ;;
-        --resume) RESUME=true; shift ;;
-        --cascaded) CASCADED=true; shift ;;
-        --auto) AUTO=true; shift ;;
-        --destroy-chain) DESTROY_CHAIN=true; shift ;;
-        -y) YES=true; shift ;;
-        --snap) PROMOTE_SNAP="$2"; shift 2 ;;
-        --sync-props) sync_props_data="$2"; shift 2 ;;
-        --target) TARGET_NODE="$2"; shift 2 ;;
-        --donor) IS_DONOR=true; shift ;;
-        *) shift ;;
-    esac
-done
 
 # Handle Suspend/Resume logic
 if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
