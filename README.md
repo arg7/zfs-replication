@@ -53,6 +53,8 @@ The following packages must be installed on all nodes:
 | `repl:node:<alias>:keep:<label>` | Host-specific retention. | `repl:node:node1:keep:min1=30` |
 | `repl:role:<role>:keep:<label>` | Role-based retention (`master`, `middle`, `sink`). | `repl:role:sink:keep:min1=90` |
 | `repl:user` | **(Global)** Fallback SSH user. | `root` |
+| `repl:zfs:raw` | Whether to use `zfs send -w` (raw, includes properties). Default: `false`. | `true` |
+| `repl:zfs:resume` | Whether to use `zfs recv -s` (resume support). Default: `false`. | `true` |
 
 ### Configuration Management (`--config`)
 
