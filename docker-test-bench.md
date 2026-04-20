@@ -72,9 +72,35 @@ for i in {1..3}; do
     docker exec node${j} bash -c "echo '$PUB_KEY' >> ~/.ssh/authorized_keys"
   done
 done
-```
 
-*Note: You will still need to set the `repl:*` ZFS properties on the datasets to configure the chain.*
+# 7. Apply Zeplicator Configuration
+# Create a configuration file with the chain topology, IPs, and retention rules
+cat << 'EOF' > test-bench.conf
+chain                          node1,node2,node3
+node:node1:fqdn                172.17.0.2
+node:node1:fs                  node1-pool/data1
+node:node2:fqdn                172.17.0.3
+node:node2:fs                  node2-pool/data2
+node:node3:fqdn                172.17.0.4
+node:node3:fs                  node3-pool/data3
+role:master:keep:min1          10
+role:middle:keep:min1          30
+role:sink:keep:min1            90
+smtp_from                      zeplicator@acme.com
+smtp_host                      mail.acme.com
+smtp_password                  [smtp password]
+smtp_port                      465
+smtp_protocol                  smtps
+smtp_starttls                  false
+smtp_to                        sysadmin@acme.com
+smtp_user                      [smtp user]
+user                           root
+EOF
+
+# Import the configuration into the master dataset
+# (Note: Zeplicator automatically translates shorthand keys to 'repl:*' properties)
+docker exec node1 /scripts/zeplicator-standalone.sh node1-pool/data1 --config --import /scripts/test-bench.conf
+```
 
 ### Data Load (IO Simulation)
 A background process on `node1` provides constant incremental changes:
