@@ -253,7 +253,45 @@ zfsbud_core() {
           continue
        fi
     else
-       # RESOLVE DIVERGENCE: Rollback receiver to the common snapshot ONLY if there are newer snapshots
+       # CHECK DATA DIVERGENCE (Split-Brain Safety Check)
+       local diff_output=""
+       if [ -n "$remote_shell" ]; then
+           diff_output=$($remote_shell "zfs diff $remote_ds@$last_snapshot_common $remote_ds | head -n 20" 2>/dev/null)
+       else
+           diff_output=$(zfs diff "$remote_ds@$last_snapshot_common" "$remote_ds" 2>/dev/null | head -n 20)
+       fi
+       
+       if [[ -n "$diff_output" ]]; then
+           zbud_msg "🚨 FATAL: Data divergence (Split-Brain) detected on $remote_ds!"
+           zbud_msg "🚨 Production data was written after $last_snapshot_common."
+           zbud_msg "🚨 Changed files (preview):"
+           while IFS= read -r line; do zbud_msg "  $line"; done <<< "$diff_output"
+           zbud_msg "🚨 Aborting replication to prevent silent data destruction!"
+           
+           # Get offending snapshots if any, to include in the alert
+           local offending_snaps=""
+           local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
+           if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
+               local found_common=false
+               for dest_line in "${destination_snapshots[@]}"; do
+                   local dest_s=$(echo "$dest_line" | awk '{print $1}')
+                   if [[ "$found_common" == true ]]; then
+                       offending_snaps+="\n  - $dest_s"
+                   elif [[ "$dest_s" == *"$last_snapshot_common" ]]; then
+                       found_common=true
+                   fi
+               done
+           fi
+           
+           local alert_msg="Data was written to $remote_ds after $last_snapshot_common. Replication aborted to prevent data loss.\n\nData Divergence (preview):\n$diff_output"
+           if [[ -n "$offending_snaps" ]]; then
+               alert_msg+="\n\nSnapshot Divergence (offending snapshots):$offending_snaps"
+           fi
+           send_smtp_alert "CRITICAL: Split-Brain Data Divergence on $remote_ds" "$alert_msg"
+           return 1
+       fi
+
+       # RESOLVE SNAPSHOT DIVERGENCE: Rollback receiver to the common snapshot ONLY if there are newer snapshots
        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
            zbud_msg "Divergence detected. Rolling back $remote_ds to $last_snapshot_common. Offending snapshots:"
