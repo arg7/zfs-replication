@@ -274,7 +274,7 @@ zfsbud_core() {
           send_initial "$remote_ds" || return 1
        else
           zbud_warn "No common snapshots for $local_ds. Use -i for initial."
-          continue
+          return 1
        fi
     else
        # CHECK DATA DIVERGENCE (Split-Brain Safety Check)

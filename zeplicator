@@ -523,9 +523,11 @@ for hop_node in "${NODES_REMAINING[@]}"; do
                 echo "${CHAIN_PREFIX}  ✅ VERIFICATION SUCCESS: Snapshot $LATEST_SNAP confirmed reaching a sink node."
             else
                 echo "${CHAIN_PREFIX}  ⚠️  WARNING: Verification FAILED. Snapshot $LATEST_SNAP not confirmed at end of chain, but transfer to $hop_node succeeded."
+                REPLICATION_SUCCESS=false
             fi
         else
             echo "${CHAIN_PREFIX}  ⚠️  WARNING: Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
+            REPLICATION_SUCCESS=false
         fi
         break
     else
