@@ -117,7 +117,7 @@ zep pool/mydata min1 10
 ### Explicit Identity Override
 If auto-discovery fails (hostname doesn't match and IP isn't in DNS/config), you can force the node's alias:
 ```bash
-zep pool/mydata --alias node2
+zep pool/mydata min1 10 --alias node2
 ```
 
 ### Initial Replication
