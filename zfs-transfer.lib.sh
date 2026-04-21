@@ -10,6 +10,9 @@ find_best_donor() {
     local ds_raw=$2
     local target_pool=$(resolve_node_pool "$target_node" "$ds_raw")
     
+    local ssh_t=$(resolve_ssh_timeout "$ds_raw")
+    local proc_t=$(resolve_proc_timeout "$ds_raw")
+
     # Iterate ALL nodes in chain to find someone who shares a GUID with target
     for (( k=${#nodes[@]}-1; k>=0; k-- )); do
         local donor_alias="${nodes[k]}"
@@ -21,13 +24,15 @@ find_best_donor() {
         local donor_target="${donor_user}@${donor_fqdn}"
 
         # Check connectivity to potential donor
-        if ! ssh -o ConnectTimeout=3 "$donor_target" "true" 2>/dev/null; then continue; fi
+        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "$donor_target" "true" 2>/dev/null; then continue; fi
         
         local donor_pool=$(resolve_node_pool "$donor_alias" "$ds_raw")
+        local ds_on_donor="${donor_pool}/${ds_raw#*/}"
+        if [[ "$donor_pool" == *"/"* ]]; then ds_on_donor="$donor_pool"; fi
         
         # Check if donor has snapshots and shares GUID with target
-        if ssh "$donor_target" "zfs list -t snapshot -H -r ${donor_pool}/${ds_raw#*/} >/dev/null 2>&1"; then
-            if ssh "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
+        if timeout "$((ssh_t + 5))" ssh -o ConnectTimeout="$ssh_t" "$donor_target" "zfs list -t snapshot -H -r $ds_on_donor >/dev/null 2>&1"; then
+            if timeout "$((proc_t + 5))" ssh -o ConnectTimeout="$ssh_t" "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
                 echo "$donor_alias"
                 return 0
             fi
@@ -152,8 +157,8 @@ zfsbud_core() {
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
+    local ssh_t=$(resolve_ssh_timeout "$dataset")
 
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
@@ -170,14 +175,14 @@ zfsbud_core() {
       if [[ "$DESTROY_CHAIN" == true ]]; then
         zbud_msg "DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
         if [ -n "$remote_shell" ]; then
-          $remote_shell "zfs destroy -r $remote_ds 2>/dev/null || true"
+          $remote_shell -o ConnectTimeout="$ssh_t" "zfs destroy -r $remote_ds 2>/dev/null || true"
         else
           zfs destroy -r "$remote_ds" 2>/dev/null || true
         fi
       fi
 
       if [ -n "$remote_shell" ]; then
-        ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+        ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       else
         ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
@@ -198,8 +203,8 @@ zfsbud_core() {
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
+    local ssh_t=$(resolve_ssh_timeout "$dataset")
 
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
@@ -215,7 +220,7 @@ zfsbud_core() {
       if [ -n "$remote_shell" ]; then
         set -o pipefail
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
-        timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
+        timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then

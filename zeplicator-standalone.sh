@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Mon Apr 20 20:42:22 EDT 2026
+# Built on: Tue Apr 21 02:14:49 EDT 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -86,6 +86,20 @@ resolve_node_user() {
     [[ -z "$user" ]] && echo "root" || echo "$user"
 }
 
+# Resolve SSH timeout (default 10s)
+resolve_ssh_timeout() {
+    local ds_raw=$1
+    local t=$(get_zfs_prop "repl:ssh:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && echo "10" || echo "$t"
+}
+
+# Resolve Process/Job timeout (default 3600s)
+resolve_proc_timeout() {
+    local ds_raw=$1
+    local t=$(get_zfs_prop "repl:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && echo "3600" || echo "$t"
+}
+
 # Resolve pool (filesystem) for a specific node alias
 resolve_node_pool() {
     local alias=$1
@@ -95,10 +109,11 @@ resolve_node_pool() {
     
     local fqdn=$(resolve_node_fqdn "$alias" "$ds_raw")
     local user=$(resolve_node_user "$alias" "$ds_raw")
+    local ssh_t=$(resolve_ssh_timeout "$ds_raw")
 
     # Pre-flight check: Is node reachable?
     if [[ "$alias" != "$my_alias" ]]; then
-        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
+        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
             return 255
         fi
     fi
@@ -107,7 +122,7 @@ resolve_node_pool() {
     if [[ "$alias" == "$my_alias" ]]; then
         pool=$(get_zfs_prop "repl:node:${alias}:fs" "$ds_raw")
     else
-        pool=$(ssh "${user}@${fqdn}" "zfs get -H -o value repl:node:${alias}:fs $ds_raw 2>/dev/null | grep -v '^-' | head -n 1")
+        pool=$(timeout "$((ssh_t + 5))" ssh -o ConnectTimeout="$ssh_t" "${user}@${fqdn}" "zfs get -H -o value repl:node:${alias}:fs $ds_raw 2>/dev/null | grep -v '^-' | head -n 1")
     fi
     
     if [[ -z "$pool" ]]; then
@@ -211,11 +226,12 @@ zbud_config_get() {
 }
 
 check_stuck_job() {
-    local lock_name="${dataset//\//-}-${label}.lock"
+    local lock_suffix=""
+    [[ -n "$CLI_ALIAS" ]] && lock_suffix="-${CLI_ALIAS}"
+    local lock_name="${dataset//\//-}-${label}${lock_suffix}.lock"
     LOCKFILE="/tmp/${lock_name}"
     
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
     
     # Determine if we should wait or fail fast
     # Wait for: promote, cascaded, suspend, resume, mark-only, or manual run (terminal)
@@ -229,10 +245,10 @@ check_stuck_job() {
         local lock_pid=$(cat "$LOCKFILE" 2>/dev/null)
         
         if [[ "$wait_for_lock" == true ]]; then
-            if [[ $waited -ge 300 ]]; then
-                die "ERR: Timeout waiting for lock after 5 minutes. Lock held by PID: $lock_pid"
+            if [[ $waited -ge 10 ]]; then
+                die "ERR: Timeout waiting for lock $LOCKFILE after 10 seconds. Lock held by PID: $lock_pid"
             fi
-            echo "Lock held by PID $lock_pid. Waiting... ($waited/300s)"
+            echo "Lock $LOCKFILE held by PID $lock_pid. Waiting... ($waited/10s)"
             sleep 10
             waited=$((waited + 10))
             continue
@@ -245,11 +261,11 @@ check_stuck_job() {
         
         if [[ "$age" -gt "$timeout_val" ]]; then
             if type send_smtp_alert >/dev/null 2>&1; then
-                send_smtp_alert "CRITICAL: ZFS replication job for $dataset ($label) is stuck. Lock file age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
+                send_smtp_alert "CRITICAL: ZFS replication job for $dataset ($label) is stuck. Lock file: $LOCKFILE. Age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
             fi
-            die "ERR: Stuck job detected ($age seconds old). Alert sent."
+            die "ERR: Stuck job detected ($age seconds old) at $LOCKFILE. Alert sent."
         else
-            die "ERR: Replication already running ($age seconds ago). PID: $lock_pid"
+            die "ERR: Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid"
         fi
     done
 
@@ -426,6 +442,9 @@ find_best_donor() {
     local ds_raw=$2
     local target_pool=$(resolve_node_pool "$target_node" "$ds_raw")
     
+    local ssh_t=$(resolve_ssh_timeout "$ds_raw")
+    local proc_t=$(resolve_proc_timeout "$ds_raw")
+
     # Iterate ALL nodes in chain to find someone who shares a GUID with target
     for (( k=${#nodes[@]}-1; k>=0; k-- )); do
         local donor_alias="${nodes[k]}"
@@ -437,13 +456,15 @@ find_best_donor() {
         local donor_target="${donor_user}@${donor_fqdn}"
 
         # Check connectivity to potential donor
-        if ! ssh -o ConnectTimeout=3 "$donor_target" "true" 2>/dev/null; then continue; fi
+        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "$donor_target" "true" 2>/dev/null; then continue; fi
         
         local donor_pool=$(resolve_node_pool "$donor_alias" "$ds_raw")
+        local ds_on_donor="${donor_pool}/${ds_raw#*/}"
+        if [[ "$donor_pool" == *"/"* ]]; then ds_on_donor="$donor_pool"; fi
         
         # Check if donor has snapshots and shares GUID with target
-        if ssh "$donor_target" "zfs list -t snapshot -H -r ${donor_pool}/${ds_raw#*/} >/dev/null 2>&1"; then
-            if ssh "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
+        if timeout "$((ssh_t + 5))" ssh -o ConnectTimeout="$ssh_t" "$donor_target" "zfs list -t snapshot -H -r $ds_on_donor >/dev/null 2>&1"; then
+            if timeout "$((proc_t + 5))" ssh -o ConnectTimeout="$ssh_t" "$donor_target" "$ZEPLICATOR_CMD $ds_raw $label 0 --alias $donor_alias --target $target_node --donor >/dev/null 2>&1"; then
                 echo "$donor_alias"
                 return 0
             fi
@@ -568,8 +589,8 @@ zfsbud_core() {
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
+    local ssh_t=$(resolve_ssh_timeout "$dataset")
 
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
@@ -586,14 +607,14 @@ zfsbud_core() {
       if [[ "$DESTROY_CHAIN" == true ]]; then
         zbud_msg "DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
         if [ -n "$remote_shell" ]; then
-          $remote_shell "zfs destroy -r $remote_ds 2>/dev/null || true"
+          $remote_shell -o ConnectTimeout="$ssh_t" "zfs destroy -r $remote_ds 2>/dev/null || true"
         else
           zfs destroy -r "$remote_ds" 2>/dev/null || true
         fi
       fi
 
       if [ -n "$remote_shell" ]; then
-        ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+        ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       else
         ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
@@ -614,8 +635,8 @@ zfsbud_core() {
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
 
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" || "$timeout_val" == "-" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
+    local ssh_t=$(resolve_ssh_timeout "$dataset")
 
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
@@ -631,7 +652,7 @@ zfsbud_core() {
       if [ -n "$remote_shell" ]; then
         set -o pipefail
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
-        timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
+        timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then
@@ -1109,11 +1130,14 @@ fi
 REPL_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
 REPL_USER=$(get_zfs_prop "repl:user" "$local_ds")
 REPL_POLICY=$(get_zfs_prop "repl:policy" "$local_ds")
+REPL_SSH_TIMEOUT=$(resolve_ssh_timeout "$local_ds")
+REPL_TIMEOUT=$(resolve_proc_timeout "$local_ds")
 [[ -z "$REPL_USER" ]] && REPL_USER="root"
 [[ -z "$REPL_POLICY" || "$REPL_POLICY" == "-" ]] && REPL_POLICY="fail"
 
 [[ -n "$raw_dataset" ]] || die "dataset not specified"
 ME=$(get_local_alias "$local_ds" "$CLI_ALIAS")
+CLI_ALIAS="$ME" # Update global CLI_ALIAS with resolved value for lock file
 NEXT_HOP=""
 IS_MASTER=false
 ME_INDEX=-1
@@ -1131,8 +1155,8 @@ if [[ -n "$REPL_CHAIN" ]]; then
             n_user=$(resolve_node_user "$n" "$local_ds")
             
             echo "${CHAIN_PREFIX}    🔍 Checking $n ($n_fqdn)..."
-            if ! ssh -o ConnectTimeout=5 "${n_user}@${n_fqdn}" "which mbuffer >/dev/null && which zstd >/dev/null"; then
-                die "Missing dependencies (mbuffer or zstd) on node: $n ($n_fqdn). Please install them before proceeding with --initial."
+            if ! timeout "$((REPL_SSH_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "${n_user}@${n_fqdn}" "which mbuffer >/dev/null && which zstd >/dev/null"; then
+                die "Missing dependencies (mbuffer or zstd) or connection timeout on node: $n ($n_fqdn). Please install them before proceeding with --initial."
             fi
         done
         echo "${CHAIN_PREFIX}  ✅ All nodes verified."
@@ -1195,6 +1219,7 @@ if [[ "$MARK_ONLY" == true ]]; then
     exit 0
 fi
 
+dataset="$local_ds"
 check_stuck_job
 
 # 1. Snapshot creation (Master only)
@@ -1285,7 +1310,7 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         PROPS_ARG=$(get_repl_props_encoded "$local_ds")
         
         # We pass the prefix to maintain the visual tree across SSH hops
-        DOWNSTREAM_OUT=$(ssh "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
+        DOWNSTREAM_OUT=$(timeout "$((REPL_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
         SSH_STATUS=$?
         
         echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"

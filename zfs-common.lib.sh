@@ -82,6 +82,20 @@ resolve_node_user() {
     [[ -z "$user" ]] && echo "root" || echo "$user"
 }
 
+# Resolve SSH timeout (default 10s)
+resolve_ssh_timeout() {
+    local ds_raw=$1
+    local t=$(get_zfs_prop "repl:ssh:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && echo "10" || echo "$t"
+}
+
+# Resolve Process/Job timeout (default 3600s)
+resolve_proc_timeout() {
+    local ds_raw=$1
+    local t=$(get_zfs_prop "repl:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && echo "3600" || echo "$t"
+}
+
 # Resolve pool (filesystem) for a specific node alias
 resolve_node_pool() {
     local alias=$1
@@ -91,10 +105,11 @@ resolve_node_pool() {
     
     local fqdn=$(resolve_node_fqdn "$alias" "$ds_raw")
     local user=$(resolve_node_user "$alias" "$ds_raw")
+    local ssh_t=$(resolve_ssh_timeout "$ds_raw")
 
     # Pre-flight check: Is node reachable?
     if [[ "$alias" != "$my_alias" ]]; then
-        if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
+        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
             return 255
         fi
     fi
@@ -103,7 +118,7 @@ resolve_node_pool() {
     if [[ "$alias" == "$my_alias" ]]; then
         pool=$(get_zfs_prop "repl:node:${alias}:fs" "$ds_raw")
     else
-        pool=$(ssh "${user}@${fqdn}" "zfs get -H -o value repl:node:${alias}:fs $ds_raw 2>/dev/null | grep -v '^-' | head -n 1")
+        pool=$(timeout "$((ssh_t + 5))" ssh -o ConnectTimeout="$ssh_t" "${user}@${fqdn}" "zfs get -H -o value repl:node:${alias}:fs $ds_raw 2>/dev/null | grep -v '^-' | head -n 1")
     fi
     
     if [[ -z "$pool" ]]; then
@@ -207,11 +222,12 @@ zbud_config_get() {
 }
 
 check_stuck_job() {
-    local lock_name="${dataset//\//-}-${label}.lock"
+    local lock_suffix=""
+    [[ -n "$CLI_ALIAS" ]] && lock_suffix="-${CLI_ALIAS}"
+    local lock_name="${dataset//\//-}-${label}${lock_suffix}.lock"
     LOCKFILE="/tmp/${lock_name}"
     
-    local timeout_val=$(get_zfs_prop "repl:timeout" "$dataset")
-    [[ -z "$timeout_val" ]] && timeout_val="3600"
+    local timeout_val=$(resolve_proc_timeout "$dataset")
     
     # Determine if we should wait or fail fast
     # Wait for: promote, cascaded, suspend, resume, mark-only, or manual run (terminal)
@@ -225,10 +241,10 @@ check_stuck_job() {
         local lock_pid=$(cat "$LOCKFILE" 2>/dev/null)
         
         if [[ "$wait_for_lock" == true ]]; then
-            if [[ $waited -ge 300 ]]; then
-                die "ERR: Timeout waiting for lock after 5 minutes. Lock held by PID: $lock_pid"
+            if [[ $waited -ge 10 ]]; then
+                die "ERR: Timeout waiting for lock $LOCKFILE after 10 seconds. Lock held by PID: $lock_pid"
             fi
-            echo "Lock held by PID $lock_pid. Waiting... ($waited/300s)"
+            echo "Lock $LOCKFILE held by PID $lock_pid. Waiting... ($waited/10s)"
             sleep 10
             waited=$((waited + 10))
             continue
@@ -241,11 +257,11 @@ check_stuck_job() {
         
         if [[ "$age" -gt "$timeout_val" ]]; then
             if type send_smtp_alert >/dev/null 2>&1; then
-                send_smtp_alert "CRITICAL: ZFS replication job for $dataset ($label) is stuck. Lock file age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
+                send_smtp_alert "CRITICAL: ZFS replication job for $dataset ($label) is stuck. Lock file: $LOCKFILE. Age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
             fi
-            die "ERR: Stuck job detected ($age seconds old). Alert sent."
+            die "ERR: Stuck job detected ($age seconds old) at $LOCKFILE. Alert sent."
         else
-            die "ERR: Replication already running ($age seconds ago). PID: $lock_pid"
+            die "ERR: Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid"
         fi
     done
 
