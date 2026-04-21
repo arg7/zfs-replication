@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 02:29:17 PM CEST 2026
+# Built on: Tue Apr 21 02:36:11 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -1046,6 +1046,52 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
     exit 0
 fi
 
+# Sync properties to nodes during promotion
+sync_promotion_props() {
+    local ds_path=$1
+    local target_nodes_ref=$2
+    eval "local target_nodes=(\"\${$target_nodes_ref[@]}\")"
+    local props_encoded=$(get_repl_props_encoded "$ds_path")
+    local props_decoded=$(echo -n "$props_encoded" | base64 -d)
+    local unreachable=()
+
+    echo "  ⚙️  Syncing replication properties..."
+    for n in "${target_nodes[@]}"; do
+        [[ "$n" == "$my_hostname" ]] && continue
+        local n_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
+        local n_user=$(resolve_node_user "$n" "$raw_dataset")
+        local n_ds=$(resolve_node_dataset "$n" "$raw_dataset")
+        echo -n "    - $n ($n_fqdn)... "
+        
+        ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF >/dev/null 2>&1
+            IFS=';' read -ra props <<< "$props_decoded"
+            for p in "\${props[@]}"; do
+                [[ -z "\$p" ]] && continue
+                k="\${p%%=*}"
+                v="\${p#*=}"
+                curr=\$(zfs get -H -o value "\$k" "$n_ds" 2>/dev/null)
+                if [[ "\$curr" != "\$v" ]]; then
+                    zfs set "\$p" "$n_ds"
+                fi
+            done
+EOF
+        if [[ $? -eq 0 ]]; then
+            echo "✅"
+        else
+            echo "❌"
+            unreachable+=("$n")
+        fi
+    done
+    
+    echo ""
+    if [[ ${#unreachable[@]} -eq 0 ]]; then
+        echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+    else
+        echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable: ${unreachable[*]}"
+        echo "     Replication will attempt to heal them during the next cycle."
+    fi
+}
+
 # Handle Promotion logic
 if [[ "$PROMOTE" == true ]]; then
     echo "  🚀 Promoting $my_hostname to Master..."
@@ -1069,68 +1115,69 @@ if [[ "$PROMOTE" == true ]]; then
 
     if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" || "$DESTROY_CHAIN" == true ]]; then
         TARGET_SNAP=""
+        declare -a REACHABLE_NODES=()
+        declare -a UNREACHABLE_NODES=()
+
         if [[ -n "$PROMOTE_SNAP" ]]; then
             TARGET_SNAP="$PROMOTE_SNAP"
-            echo "Checking if snapshot $TARGET_SNAP exists on all nodes and has consistent GUID..."
-            
-            declare -A snap_guids
+            echo "  🔍 Verifying snapshot @$TARGET_SNAP consistency..."
             for n in "${NEW_NODES[@]}"; do
+                echo -n "    - $n... "
                 local_ds_target=$(resolve_node_dataset "$n" "$raw_dataset")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
                 local_user=$(resolve_node_user "$n" "$raw_dataset")
                 g=$(ssh "${local_user}@${local_fqdn}" "zfs get -H -o value guid ${local_ds_target}@$TARGET_SNAP" 2>/dev/null)
-                if [[ -z "$g" || "$g" == "-" ]]; then
-                    die "ERR: Snapshot @$TARGET_SNAP not found on $n"
-                fi
-                snap_guids["$n"]=$g
-            done
-            
-            f_node="${NEW_NODES[0]}"
-            ref_guid=${snap_guids[$f_node]}
-            for n in "${NEW_NODES[@]}"; do
-                if [[ "${snap_guids[$n]}" != "$ref_guid" ]]; then
-                    die "ERR: Snapshot @$TARGET_SNAP exists on all nodes but GUIDs mismatch! ($f_node: $ref_guid vs $n: ${snap_guids[$n]}). The chain has diverged."
+                if [[ -n "$g" && "$g" != "-" ]]; then
+                    echo "✅"
+                    REACHABLE_NODES+=("$n")
+                else
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
                 fi
             done
-            echo "Snapshot @$TARGET_SNAP is consistent across all nodes (GUID: $ref_guid)."
+            [[ -z "${REACHABLE_NODES[0]}" ]] && die "ERR: Snapshot @$TARGET_SNAP not found on any reachable node."
         else
-            echo "Auto-discovering latest common snapshot across the chain (using GUIDs)..."
+            echo "  🔍 Auto-discovering latest common snapshot..."
             tmp_common="/tmp/zfs-common-snaps.$$"
             f_node_flag=true
             
             for n in "${NEW_NODES[@]}"; do
-                echo "  Querying $n..."
+                echo -n "    - Querying $n... "
                 local_ds_target=$(resolve_node_dataset "$n" "$raw_dataset")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
                 local_user=$(resolve_node_user "$n" "$raw_dataset")
                 node_target="${local_user}@${local_fqdn}"
 
                 node_tmp="/tmp/zfs-node-snaps.$$"
+                query_ok=false
                 if [[ "$n" == "$my_hostname" ]]; then
-                    zfs list -t snap -H -o guid -r "${local_ds_target}" 2>/dev/null > "$node_tmp"
+                    zfs list -t snap -H -o guid -r "${local_ds_target}" 2>/dev/null > "$node_tmp" && query_ok=true
                 else
-                    if ! timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o guid -r ${local_ds_target}" 2>/dev/null > "$node_tmp"; then
-                        echo "    ⚠️  Node $n is unreachable, skipping..."
-                        rm -f "$node_tmp"
-                        continue
+                    if timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o guid -r ${local_ds_target}" 2>/dev/null > "$node_tmp"; then
+                        query_ok=true
                     fi
                 fi
 
-                if [[ "$f_node_flag" == true ]]; then
-                    mv "$node_tmp" "$tmp_common"
-                    f_node_flag=false
+                if [[ "$query_ok" == true ]]; then
+                    echo "✅"
+                    REACHABLE_NODES+=("$n")
+                    if [[ "$f_node_flag" == true ]]; then
+                        mv "$node_tmp" "$tmp_common"
+                        f_node_flag=false
+                    else
+                        grep -Fxf "$tmp_common" "$node_tmp" > "${tmp_common}.new"
+                        mv "${tmp_common}.new" "$tmp_common"
+                        rm -f "$node_tmp"
+                    fi
                 else
-                    grep -Fxf "$tmp_common" "$node_tmp" > "${tmp_common}.new"
-                    mv "${tmp_common}.new" "$tmp_common"
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
                     rm -f "$node_tmp"
                 fi
-                [[ ! -s "$tmp_common" ]] && break
+                [[ ! -s "$tmp_common" && "$f_node_flag" == false ]] && break
             done
 
             if [[ -s "$tmp_common" ]]; then
-                # We have a list of common GUIDs. 
-                # Pick the LATEST one by checking our local snapshots in reverse and seeing which one is in the common list.
-                # zfs list -H -o guid -r "$local_ds" returns them in creation order.
                 TARGET_GUID=""
                 while read -r local_guid; do
                     if grep -qx "$local_guid" "$tmp_common"; then
@@ -1139,11 +1186,10 @@ if [[ "$PROMOTE" == true ]]; then
                 done < <(zfs list -t snap -H -o guid -r "$local_ds")
 
                 if [[ -n "$TARGET_GUID" ]]; then
-                    # Resolve name for the found GUID
                     local_info=$(zfs list -t snap -H -o name,guid -r "$local_ds" | grep "$TARGET_GUID" | head -n 1)
                     TARGET_SNAP=$(echo "$local_info" | awk '{print $1}' | cut -d'@' -f2)
                     target_guid=$(echo "$local_info" | awk '{print $2}')
-                    echo "Found latest common snapshot: $TARGET_SNAP (GUID: $target_guid)"
+                    echo "  🔗 Found latest common snapshot: @$TARGET_SNAP"
                 else
                     die "ERR: Could not resolve any common snapshot GUID locally."
                 fi
@@ -1167,81 +1213,35 @@ if [[ "$PROMOTE" == true ]]; then
                 if [[ "$resp" != "y" ]]; then die "Aborted by user."; fi
             fi
 
-            for n in "${NEW_NODES[@]}"; do
+            echo "  🔄 Rolling back reachable nodes to @$TARGET_SNAP..."
+            for n in "${REACHABLE_NODES[@]}"; do
+                echo -n "    - $n... "
                 local_ds_target=$(resolve_node_dataset "$n" "$raw_dataset")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
                 local_user=$(resolve_node_user "$n" "$raw_dataset")
-                ssh "${local_user}@${local_fqdn}" "zfs rollback -r ${local_ds_target}@$TARGET_SNAP" || die "ERR: Rollback failed on $n"
+                if [[ "$n" == "$my_hostname" ]]; then
+                    zfs rollback -r "${local_ds_target}@$TARGET_SNAP" && echo "✅" || die "ERR: Local rollback failed"
+                else
+                    ssh "${local_user}@${local_fqdn}" "zfs rollback -r ${local_ds_target}@$TARGET_SNAP" && echo "✅" || echo "❌"
+                fi
             done
-            echo "Chain successfully consistent at @$TARGET_SNAP"
             
-            # Successfully healed, now update local Master state
-            echo "  Updating local chain config: $NEW_CHAIN"
+            echo "  ✨ Updating local chain configuration..."
             zfs set repl:chain="$NEW_CHAIN" "$local_ds"
             send_smtp_alert "NOTICE: Node $my_hostname has been PROMOTED to Master for dataset $raw_dataset. New chain: $NEW_CHAIN"
 
-            # Sync properties to all nodes in the new chain and exit
-            echo "  Syncing replication properties across the chain..."
-            PROPS_ENCODED=$(get_repl_props_encoded "$local_ds")
-            PROPS_DECODED=$(echo -n "$PROPS_ENCODED" | base64 -d)
-            for n in "${NEW_NODES[@]}"; do
-                [[ "$n" == "$my_hostname" ]] && continue
-                n_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
-                n_user=$(resolve_node_user "$n" "$raw_dataset")
-                n_ds=$(resolve_node_dataset "$n" "$raw_dataset")
-                echo "    Syncing properties to $n ($n_fqdn)..."
-                
-                # Send the decoded properties string and a small script to parse and apply it
-                ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF
-                    IFS=';' read -ra props <<< "$PROPS_DECODED"
-                    for p in "\${props[@]}"; do
-                        [[ -z "\$p" ]] && continue
-                        k="\${p%%=*}"
-                        v="\${p#*=}"
-                        curr=\$(zfs get -H -o value "\$k" "$n_ds" 2>/dev/null)
-                        if [[ "\$curr" != "\$v" ]]; then
-                            echo "      Updating \$k -> \$v"
-                            zfs set "\$p" "$n_ds"
-                        fi
-                    done
-EOF
-                if [[ $? -ne 0 ]]; then echo "    Warning: Prop sync failed on $n"; fi
-            done
+            sync_promotion_props "$local_ds" "NEW_NODES"
             exit 0
         fi
     fi
     # If we are here and PROMOTE=true, it means no auto/snap/rollback was requested,
     # but we should still sync the new chain configuration and exit.
     if [[ "$PROMOTE" == true ]]; then
-        echo "  Updating local chain config: $NEW_CHAIN"
+        echo "  ✨ Updating local chain configuration..."
         zfs set repl:chain="$NEW_CHAIN" "$local_ds"
         send_smtp_alert "NOTICE: Node $my_hostname has been PROMOTED to Master for dataset $raw_dataset. New chain: $NEW_CHAIN"
 
-        echo "  Syncing replication properties across the chain..."
-        PROPS_ENCODED=$(get_repl_props_encoded "$local_ds")
-        PROPS_DECODED=$(echo -n "$PROPS_ENCODED" | base64 -d)
-        for n in "${NEW_NODES[@]}"; do
-            [[ "$n" == "$my_hostname" ]] && continue
-            n_fqdn=$(resolve_node_fqdn "$n" "$raw_dataset")
-            n_user=$(resolve_node_user "$n" "$raw_dataset")
-            n_ds=$(resolve_node_dataset "$n" "$raw_dataset")
-            echo "    Syncing properties to $n ($n_fqdn)..."
-            
-            ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF
-                IFS=';' read -ra props <<< "$PROPS_DECODED"
-                for p in "\${props[@]}"; do
-                    [[ -z "\$p" ]] && continue
-                    k="\${p%%=*}"
-                    v="\${p#*=}"
-                    curr=\$(zfs get -H -o value "\$k" "$n_ds" 2>/dev/null)
-                    if [[ "\$curr" != "\$v" ]]; then
-                        echo "      Updating \$k -> \$v"
-                        zfs set "\$p" "$n_ds"
-                    fi
-                done
-EOF
-            if [[ $? -ne 0 ]]; then echo "    Warning: Prop sync failed on $n"; fi
-        done
+        sync_promotion_props "$local_ds" "NEW_NODES"
         exit 0
     fi
 fi 
