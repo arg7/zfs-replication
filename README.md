@@ -55,6 +55,7 @@ The following packages must be installed on all nodes:
 | `repl:user` | **(Global)** Fallback SSH user. | `root` |
 | `repl:zfs:raw` | Whether to use `zfs send -w` (raw, includes properties). Default: `false`. | `true` |
 | `repl:zfs:resume` | Whether to use `zfs recv -s` (resume support). Default: `false`. | `true` |
+| `repl:zfs:force` | If `false`, omits `-F` from `zfs receive` (Safe Mode). Default: `true`. | `false` |
 
 ### Configuration Management (`--config`)
 
