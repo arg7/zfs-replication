@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 03:47:30 PM CEST 2026
+# Built on: Tue Apr 21 03:49:55 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -210,7 +210,7 @@ die() {
             send_smtp_alert "ERROR: $msg"
         fi
     fi
-    if [[ "$CASCADED" != true ]]; then
+    if [[ "$CASCADED" != true && "$exit_code" -eq 2 ]]; then
         echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
         echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
         echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
