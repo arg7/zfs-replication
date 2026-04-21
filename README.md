@@ -4,6 +4,10 @@ A robust, cascading ZFS replication script designed for multi-node chains. It ha
 
 ## Features
 
+- **Split-Brain Protection**: Automatically performs a `zfs diff` between the common base and the local dataset on the sink. Replication **aborts** with a critical alert if any local data changes are detected, preventing silent data loss.
+- **Intelligent Donor Discovery**: Downstream nodes can automatically discover and "pull" from any other node in the chain (not just their immediate parent) to find the best common snapshot, ensuring resilience even if multiple nodes are out of sync.
+- **GUID-based Consistency**: Uses internal ZFS GUIDs instead of snapshot names for all intersection checks, making the system immune to snapshot renaming or formatting differences.
+- **Visual Progress & Icons**: Rich CLI output with status icons (✅, ❌, 🔗) and a final success/partial-success summary for complex operations like promotion.
 - **Cascading Replication**: Automatically triggers replication on the next hop in the chain once the local transfer is verified.
 - **End-to-End Verification**: Confirms the arrival of the specific snapshot at the final sink before marking local snapshots as "shipped".
 - **Automatic Configuration Sync**: All `repl:*` properties (retention, SMTP, chain order) are automatically propagated from the master to all downstream nodes during replication.
