@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 12:29:14 PM CEST 2026
+# Built on: Tue Apr 21 12:41:59 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -1103,12 +1103,17 @@ if [[ "$PROMOTE" == true ]]; then
                 local_user=$(resolve_node_user "$n" "$raw_dataset")
                 node_target="${local_user}@${local_fqdn}"
 
+                node_tmp="/tmp/zfs-node-snaps.$$"
+                if ! timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o name,guid -r ${local_ds_target}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$node_tmp"; then
+                    echo "    ⚠️  Node $n is unreachable, skipping..."
+                    rm -f "$node_tmp"
+                    continue
+                fi
+
                 if [[ "$f_node_flag" == true ]]; then
-                    ssh "$node_target" "zfs list -t snap -H -o name,guid -r ${local_ds_target}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$tmp_common"
+                    mv "$node_tmp" "$tmp_common"
                     f_node_flag=false
                 else
-                    node_tmp="/tmp/zfs-node-snaps.$$"
-                    ssh "$node_target" "zfs list -t snap -H -o name,guid -r ${local_ds_target}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$node_tmp"
                     grep -Fxf "$tmp_common" "$node_tmp" > "${tmp_common}.new"
                     mv "${tmp_common}.new" "$tmp_common"
                     rm -f "$node_tmp"
