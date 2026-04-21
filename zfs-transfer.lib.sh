@@ -178,14 +178,13 @@ zfsbud_core() {
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
     local use_resume=$(get_zfs_prop "repl:zfs:resume" "$dataset")
-    local use_force=$(get_zfs_prop "repl:zfs:force" "$dataset")
     
     local send_args="-R"
     local recv_args="-u"
     
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$use_force" != "false" ]] && recv_args="-F $recv_args"
+    [[ "$REPL_FORCE" != "false" ]] && recv_args="-F $recv_args"
 
     if [ -z "$dry_run" ]; then
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
@@ -226,14 +225,13 @@ zfsbud_core() {
     # Configure flags based on properties
     local use_raw=$(get_zfs_prop "repl:zfs:raw" "$dataset")
     local use_resume=$(get_zfs_prop "repl:zfs:resume" "$dataset")
-    local use_force=$(get_zfs_prop "repl:zfs:force" "$dataset")
     
     local send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\""
     local recv_args="-u"
     
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$use_force" != "false" ]] && recv_args="-F $recv_args"
+    [[ "$REPL_FORCE" != "false" ]] && recv_args="-F $recv_args"
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
@@ -278,6 +276,8 @@ zfsbud_core() {
     
     zbud_msg "  📦 Processing $local_ds -> ${destination_parent_dataset} (Target: ${remote_ds})"
     
+    REPL_FORCE=$(get_zfs_prop "repl:zfs:force" "$dataset")
+
     set_source_snapshots "$local_ds"
     if ((${#source_snapshots[@]} < 1)); then
        zbud_warn "No snapshots for $local_ds"
@@ -289,10 +289,12 @@ zfsbud_core() {
     if [ -n "$resume_token" ]; then
        # Resume logic simplified
        if [ -z "$dry_run" ]; then
+         local resume_recv_args="-u"
+         [[ "$REPL_FORCE" != "false" ]] && resume_recv_args="-F $resume_recv_args"
          if [ -n "$remote_shell" ]; then
-           zfs send $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv -F -u ${remote_ds}"
+           zfs send $verbose -t "$resume_token" | mbuffer -q -r "$RATE" -m "$BUF" | zstd | $remote_shell "zstd -d | zfs recv $resume_recv_args ${remote_ds}"
          else
-           zfs send $verbose -t "$resume_token" | zfs recv -F -u "${remote_ds}"
+           zfs send $verbose -t "$resume_token" | zfs recv $resume_recv_args "${remote_ds}"
          fi
        fi
     fi
@@ -360,11 +362,13 @@ zfsbud_core() {
        
        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
-           # Instead of pre-emptive rollback, we'll let 'zfs recv -F' handle it.
-           # However, we should check if the LATEST destination snapshot is actually
-           # a descendant of the common snapshot (which zfs diff @common . already confirmed by being empty).
+           # Instead of pre-emptive rollback, we'll let 'zfs recv -F' handle it (if enabled).
            zbud_msg "  ℹ️  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
-           zbud_msg "  ℹ️  Using 'zfs recv -F' to sync."
+           if [[ "$REPL_FORCE" != "false" ]]; then
+               zbud_msg "  ℹ️  Using 'zfs recv -F' to sync."
+           else
+               zbud_msg "  ⚠️  Force is disabled; replication will fail if newer snapshots exist on destination."
+           fi
        fi
        send_incremental "$remote_ds" || return 1
     fi

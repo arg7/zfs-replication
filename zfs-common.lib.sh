@@ -5,7 +5,8 @@
 get_zfs_prop() {
     local prop=$1
     local ds=$2
-    zfs get -H -o value "$prop" "$ds" 2>/dev/null | grep -v "^-$" | head -n 1
+    local val=$(zfs get -H -o value "$prop" "$ds" 2>/dev/null | head -n 1)
+    [[ -z "$val" ]] && echo "-" || echo "$val"
 }
 
 # Get the local node alias (using cli override, hostname in chain, fqdn match, or hostname as fallback)
@@ -20,6 +21,7 @@ get_local_alias() {
     fi
 
     local sys_host=$(hostname)
+    # zbud_msg "  🧪 DEBUG: get_local_alias(ds=$raw_ds, cli=$cli_alias). sys_host=$sys_host"
     
     # Try to read the chain from the dataset
     local chain=$(get_zfs_prop "repl:chain" "$raw_ds")
@@ -34,6 +36,7 @@ get_local_alias() {
 
     # 2. Does hostname directly match an alias in the chain?
     for n in "${nodes[@]}"; do
+        # zbud_msg "  🧪 DEBUG: Comparing alias '$n' with sys_host '$sys_host'"
         if [[ "$n" == "$sys_host" ]]; then
             echo "$sys_host"
             return 0
@@ -42,8 +45,10 @@ get_local_alias() {
 
     # 3. Does any node's FQDN resolve to one of our local IPs?
     local local_ips=$(hostname -I 2>/dev/null || ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    # zbud_msg "  🧪 DEBUG: local_ips='$local_ips'"
     for n in "${nodes[@]}"; do
         local n_fqdn=$(get_zfs_prop "repl:node:${n}:fqdn" "$raw_ds")
+        # zbud_msg "  🧪 DEBUG: Checking node '$n' with fqdn '$n_fqdn'"
         if [[ -n "$n_fqdn" && "$n_fqdn" != "-" ]]; then
             # Direct string match with local IPs
             if echo "$local_ips" | grep -qw "$n_fqdn"; then
@@ -68,7 +73,7 @@ resolve_node_fqdn() {
     local alias=$1
     local ds_raw=$2
     local fqdn=$(get_zfs_prop "repl:node:${alias}:fqdn" "$ds_raw")
-    [[ -z "$fqdn" ]] && echo "$alias" || echo "$fqdn"
+    [[ -z "$fqdn" || "$fqdn" == "-" ]] && echo "$alias" || echo "$fqdn"
 }
 
 # Resolve SSH user for a specific node alias
@@ -76,10 +81,10 @@ resolve_node_user() {
     local alias=$1
     local ds_raw=$2
     local user=$(get_zfs_prop "repl:node:${alias}:user" "$ds_raw")
-    if [[ -z "$user" ]]; then
+    if [[ -z "$user" || "$user" == "-" ]]; then
         user=$(get_zfs_prop "repl:user" "$ds_raw")
     fi
-    [[ -z "$user" ]] && echo "root" || echo "$user"
+    [[ -z "$user" || "$user" == "-" ]] && echo "root" || echo "$user"
 }
 
 # Resolve SSH timeout (default 10s)
@@ -89,10 +94,10 @@ resolve_ssh_timeout() {
     [[ -z "$t" || "$t" == "-" ]] && echo "10" || echo "$t"
 }
 
-# Resolve Process/Job timeout (default 3600s)
+# Resolve process timeout (default 3600s)
 resolve_proc_timeout() {
     local ds_raw=$1
-    local t=$(get_zfs_prop "repl:timeout" "$ds_raw")
+    local t=$(get_zfs_prop "repl:proc:timeout" "$ds_raw")
     [[ -z "$t" || "$t" == "-" ]] && echo "3600" || echo "$t"
 }
 
@@ -113,10 +118,13 @@ resolve_node_pool() {
     local fqdn=$(resolve_node_fqdn "$alias" "$ds_raw")
     local user=$(resolve_node_user "$alias" "$ds_raw")
     local ssh_t=$(resolve_ssh_timeout "$ds_raw")
+    # zbud_msg "  🧪 DEBUG: resolve_node_pool($alias). my_alias=$my_alias, user=$user, fqdn=$fqdn, ssh_t=$ssh_t"
 
     # Pre-flight check: Is node reachable?
     if [[ "$alias" != "$my_alias" ]]; then
+        # zbud_msg "  🧪 DEBUG: Pre-flight SSH check: ssh -o ConnectTimeout=$ssh_t -o BatchMode=yes ${user}@${fqdn} true"
         if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
+            # zbud_msg "  🧪 DEBUG: Pre-flight SSH check FAILED"
             return 255
         fi
     fi

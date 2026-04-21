@@ -14,23 +14,33 @@ resolve_retention() {
     
     local val=""
     
-    # 1. Host-specific: repl:node:<alias>:keep:<label>
+    # 1. Host-specific: repl:node:${ME}:keep:${lbl}
     val=$(get_zfs_prop "repl:node:${ME}:keep:${lbl}" "$ds")
-    
-    # 2. Role-specific: repl:role:<role>:keep:<label>
-    [[ -z "$val" ]] && val=$(get_zfs_prop "repl:role:${role}:keep:${lbl}" "$ds")
-    
-    # 3. Final Fallback
-    [[ -z "$val" ]] && val="$fallback"
-    
-    echo "$val"
-}
 
-purge_shipped_snapshots() {
+    # 2. Role-specific: repl:role:<role>:keep:<label>
+    [[ -z "$val" || "$val" == "-" ]] && val=$(get_zfs_prop "repl:role:${role}:keep:${lbl}" "$ds")
+
+    # 3. Final Fallback
+    [[ -z "$val" || "$val" == "-" ]] && val="$fallback"
+
+    # Ensure val is a number, otherwise default to a safe high number like 1000 or the fallback if numeric
+    if [[ ! "$val" =~ ^[0-9]+$ ]]; then
+       val=1000
+    fi
+
+    echo "$val"
+    }
+
+    purge_shipped_snapshots() {
     local ds=$1
     local lbl=$2
     local k_count=$3
-    
+
+    # Defensive check for k_count being a number
+    if [[ ! "$k_count" =~ ^[0-9]+$ ]]; then
+        k_count=1000
+    fi
+
     echo "${CHAIN_PREFIX}  🔄 Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
     
     # Get snapshots matching label, sorted by creation date (newest first)

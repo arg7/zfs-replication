@@ -2,16 +2,19 @@
 
 # build.sh - Compile Zeplicator modules into a single distributable script
 
-OUTPUT="zeplicator-standalone.sh"
+BUILD_DIR="build"
+OUTPUT="${BUILD_DIR}/zep"
+
+mkdir -p "${BUILD_DIR}"
 
 echo "Compiling iomon.c..."
-gcc -O3 iomon.c -o iomon || exit 1
+gcc -O3 iomon.c -o "${BUILD_DIR}/iomon" || exit 1
 
 echo "Building ${OUTPUT}..."
 
 cat <<EOF > "${OUTPUT}"
 #!/bin/bash
-# zeplicator-standalone.sh - Compiled ZFS Replication Manager
+# zpl - Compiled ZFS Replication Manager
 # Built on: $(date)
 
 EOF
@@ -31,3 +34,4 @@ echo "# --- END zeplicator orchestrator ---" >> "${OUTPUT}"
 
 chmod +x "${OUTPUT}"
 echo "Done! Generated ${OUTPUT}"
+echo "Artifacts available in ${BUILD_DIR}/"
