@@ -182,7 +182,14 @@ apply_repl_props() {
     done
 }
 
-zbud_msg() { echo "${CHAIN_PREFIX}    $*" 1>&2; }
+zbud_msg() { 
+    local msg="${CHAIN_PREFIX}    $*"
+    echo "$msg" 1>&2
+    local alias=$(hostname)
+    local log_file="/var/log/zeplicator-${alias}.log"
+    # Strip ANSI colors/formatting for the log file
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
+}
 zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
 
 indent_output() {
@@ -190,7 +197,8 @@ indent_output() {
 }
 
 die() {
-    local msg="$*"
+    local msg="$1"
+    local exit_code=${2:-1}
     zbud_msg "❌ ERROR: $msg"
 
     if [[ -n "$local_ds" ]]; then
@@ -199,10 +207,10 @@ die() {
         fi
     fi
     echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
-    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)
-  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)
-  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
-    exit 1
+    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
+    echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
+    echo "  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
+    exit $exit_code
 }
 
 zbud_config_read_file() {

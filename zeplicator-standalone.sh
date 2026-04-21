@@ -186,7 +186,14 @@ apply_repl_props() {
     done
 }
 
-zbud_msg() { echo "${CHAIN_PREFIX}    $*" 1>&2; }
+zbud_msg() { 
+    local msg="${CHAIN_PREFIX}    $*"
+    echo "$msg" 1>&2
+    local alias=$(hostname)
+    local log_file="/var/log/zeplicator-${alias}.log"
+    # Strip ANSI colors/formatting for the log file
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
+}
 zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
 
 indent_output() {
@@ -194,7 +201,8 @@ indent_output() {
 }
 
 die() {
-    local msg="$*"
+    local msg="$1"
+    local exit_code=${2:-1}
     zbud_msg "❌ ERROR: $msg"
 
     if [[ -n "$local_ds" ]]; then
@@ -203,10 +211,10 @@ die() {
         fi
     fi
     echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
-    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)
-  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)
-  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
-    exit 1
+    echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
+    echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
+    echo "  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
+    exit $exit_code
 }
 
 zbud_config_read_file() {
@@ -1301,8 +1309,7 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         echo "${CHAIN_PREFIX}  ✅ Replication to $HOP_TARGET successful."
         TRANSFER_DONE=true
     elif [[ $ZBUD_STATUS -eq 2 ]]; then
-        echo "${CHAIN_PREFIX}  🚨 FATAL: Split-Brain detected. Aborting hop $hop_node to prevent data loss."
-        TRANSFER_DONE=false
+        die "🚨 FATAL: Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
     else
         echo "${CHAIN_PREFIX}  ⚠️  WARNING: Local replication to $hop_node failed. Searching chain for a better donor..."
         
@@ -1359,6 +1366,11 @@ for hop_node in "${NODES_REMAINING[@]}"; do
             # We pass the prefix to maintain the visual tree across SSH hops
             DOWNSTREAM_OUT=$(timeout "$((REPL_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_dataset $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --cascaded" 2>&1)
             SSH_STATUS=$?
+
+            if [[ $SSH_STATUS -eq 2 ]]; then
+                echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"
+                die "🚨 FATAL: Split-Brain detected downstream from $hop_node. Aborting entire replication job." 2
+            fi
             
             echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"
             
