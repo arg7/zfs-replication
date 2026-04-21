@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 03:28:55 PM CEST 2026
+# Built on: Tue Apr 21 03:47:30 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -652,6 +652,12 @@ zfsbud_core() {
       else
         ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
+
+      local delay=$(get_zfs_prop "repl:debug:send_delay" "$local_ds")
+      if [[ -n "$delay" && "$delay" -gt 0 ]]; then
+        zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send (Initial)..."
+        sleep "$delay"
+      fi
     fi
     last_snapshot_common="${latest_snapshot_source#*@}"
   }
@@ -697,6 +703,12 @@ zfsbud_core() {
         fi
       else
         ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+      fi
+
+      local delay=$(get_zfs_prop "repl:debug:send_delay" "$local_ds")
+      if [[ -n "$delay" && "$delay" -gt 0 ]]; then
+        zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send (Incremental)..."
+        sleep "$delay"
       fi
     fi
   }
