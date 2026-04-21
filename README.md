@@ -117,29 +117,29 @@ zep pool/mydata min1 10
 ### Explicit Identity Override
 If auto-discovery fails (hostname doesn't match and IP isn't in DNS/config), you can force the node's alias:
 ```bash
-zep pool/mydata min1 10 --alias node2
+zep pool/mydata --alias node2
 ```
 
 ### Initial Replication
 For the first run (no common snapshots downstream). Sends a success email upon completion.
 ```bash
-zep pool/mydata min1 10 --initial
+zep pool/mydata --initial
 ```
 
 ### Master Promotion & Recovery
 1. **Auto-Discovery (Recommended)**:
    ```bash
-   zep pool/mydata min1 10 --promote --auto [-y]
+   zep pool/mydata --promote --auto [-y]
    ```
 2. **Brutal Startover (Dangerous)**:
    ```bash
-   zep pool/mydata min1 10 --promote --destroy-chain
+   zep pool/mydata --promote --destroy-chain
    ```
 
 ### Pause & Resume
 ```bash
-zep pool/mydata min1 10 --suspend
-zep pool/mydata min1 10 --resume
+zep pool/mydata --suspend
+zep pool/mydata --resume
 ```
 
 ### Dry-Run & Simulation
