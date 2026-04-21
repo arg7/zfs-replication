@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 01:00:01 PM CEST 2026
+# Built on: Tue Apr 21 01:05:19 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -1097,10 +1097,14 @@ if [[ "$PROMOTE" == true ]]; then
                 node_target="${local_user}@${local_fqdn}"
 
                 node_tmp="/tmp/zfs-node-snaps.$$"
-                if ! timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o name,guid -r ${local_ds_target}" 2>/dev/null | awk '{print $1" "$2}' | cut -d'@' -f2 > "$node_tmp"; then
-                    echo "    ⚠️  Node $n is unreachable, skipping..."
-                    rm -f "$node_tmp"
-                    continue
+                if [[ "$n" == "$my_hostname" ]]; then
+                    zfs list -t snap -H -o guid -r "${local_ds_target}" 2>/dev/null > "$node_tmp"
+                else
+                    if ! timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o guid -r ${local_ds_target}" 2>/dev/null > "$node_tmp"; then
+                        echo "    ⚠️  Node $n is unreachable, skipping..."
+                        rm -f "$node_tmp"
+                        continue
+                    fi
                 fi
 
                 if [[ "$f_node_flag" == true ]]; then
@@ -1115,10 +1119,25 @@ if [[ "$PROMOTE" == true ]]; then
             done
 
             if [[ -s "$tmp_common" ]]; then
-                latest_line=$(tail -n 1 "$tmp_common")
-                TARGET_SNAP=$(echo "$latest_line" | awk '{print $1}')
-                target_guid=$(echo "$latest_line" | awk '{print $2}')
-                echo "Found latest common snapshot: $TARGET_SNAP (GUID: $target_guid)"
+                # We have a list of common GUIDs. 
+                # Pick the LATEST one by checking our local snapshots in reverse and seeing which one is in the common list.
+                # zfs list -H -o guid -r "$local_ds" returns them in creation order.
+                TARGET_GUID=""
+                while read -r local_guid; do
+                    if grep -qx "$local_guid" "$tmp_common"; then
+                        TARGET_GUID="$local_guid"
+                    fi
+                done < <(zfs list -t snap -H -o guid -r "$local_ds")
+
+                if [[ -n "$TARGET_GUID" ]]; then
+                    # Resolve name for the found GUID
+                    local_info=$(zfs list -t snap -H -o name,guid -r "$local_ds" | grep "$TARGET_GUID" | head -n 1)
+                    TARGET_SNAP=$(echo "$local_info" | awk '{print $1}' | cut -d'@' -f2)
+                    target_guid=$(echo "$local_info" | awk '{print $2}')
+                    echo "Found latest common snapshot: $TARGET_SNAP (GUID: $target_guid)"
+                else
+                    die "ERR: Could not resolve any common snapshot GUID locally."
+                fi
             fi
             rm -f "$tmp_common"
         fi
