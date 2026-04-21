@@ -64,33 +64,50 @@ The following packages must be installed on all nodes:
 
 ### Configuration Management (`--config`)
 
-Zeplicator provides a built-in `--config` sub-command to manage `repl:*` properties on your datasets easily, including shorthand support for common properties (`smtp:`, `node:`, `role:`).
+Zeplicator provides a built-in configuration engine to manage `repl:*` ZFS properties without needing to call `zfs set` manually. It supports shorthand prefixes for common settings.
 
-**List configuration:**
+#### Available Subcommands:
+
+| Subcommand | Description |
+| :--- | :--- |
+| `--list` | (Default) Lists all `repl:` properties currently set on the dataset. |
+| `key=value` | Sets a property. Supports shorthands like `smtp:host=...` or `node:n1:fqdn=...`. |
+| `--clear <key>` | Inherits/removes a specific property from the dataset. |
+| `--export <file>`| Saves all `repl:` properties to a plain-text file. |
+| `--import <file>`| Loads and sets properties from a file. Supports comments and shorthands. |
+
+#### Usage Examples:
+
+**1. Viewing Configuration**
 ```bash
-zeplicator pool/mydata --config --list
+zeplicator pool/mydata --config  # or --config --list
 ```
 
-**Set properties (supports shorthand):**
+**2. Setting Properties (with Shorthands)**
+Shorthands automatically expand to their full ZFS property names:
+- `smtp:host=mail.com` $\rightarrow$ `repl:smtp_host=mail.com`
+- `node:n1:fqdn=10.0.0.1` $\rightarrow$ `repl:node:n1:fqdn=10.0.0.1`
+- `role:sink:keep:min1=90` $\rightarrow$ `repl:role:sink:keep:min1=90`
+
 ```bash
-zeplicator pool/mydata --config smtp:host=smtp.example.com role:sink:keep:min1=90
+zeplicator pool/mydata --config smtp:host=smtp.gmail.com smtp:port=587 node:node1:user=repl
 ```
 
-**Clear a property:**
+**3. Clearing a Property**
 ```bash
 zeplicator pool/mydata --config --clear smtp:port
 ```
 
-**Export & Import configurations:**
+**4. Batch Import/Export**
 ```bash
-# Backup configuration to a file
-zeplicator pool/mydata --config --export /tmp/config.txt
+# Export settings from one dataset
+zeplicator pool/old-data --config --export /tmp/repl.conf
 
-# Import configuration from a file (supports shorthand in the file)
-zeplicator pool/mydata --config --import /tmp/config.txt
+# Import to another dataset
+zeplicator pool/new-data --config --import /tmp/repl.conf
 ```
 
-## Usage
+### Usage
 
 ### Basic Replication
 ```bash
