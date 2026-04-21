@@ -334,7 +334,7 @@ zfsbud_core() {
            # Write to error log to ensure it's picked up by send_smtp_alert 'Error Details' block
            echo -e "$alert_msg" > /tmp/zfs-replication.err
            send_smtp_alert "CRITICAL: Split-Brain Data Divergence on $remote_ds"
-           return 1
+           return 2
        fi
 
        # RESOLVE SNAPSHOT DIVERGENCE: Rollback receiver to the common snapshot ONLY if there are newer snapshots

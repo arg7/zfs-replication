@@ -492,9 +492,15 @@ for hop_node in "${NODES_REMAINING[@]}"; do
     if [[ "$DRY_RUN" == true ]]; then zfsbud_opts="${zfsbud_opts} -d"; fi
     
     TRANSFER_DONE=false
-    if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
+    zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"
+    ZBUD_STATUS=$?
+
+    if [[ $ZBUD_STATUS -eq 0 ]]; then
         echo "${CHAIN_PREFIX}  ✅ Replication to $HOP_TARGET successful."
         TRANSFER_DONE=true
+    elif [[ $ZBUD_STATUS -eq 2 ]]; then
+        echo "${CHAIN_PREFIX}  🚨 FATAL: Split-Brain detected. Aborting hop $hop_node to prevent data loss."
+        TRANSFER_DONE=false
     else
         echo "${CHAIN_PREFIX}  ⚠️  WARNING: Local replication to $hop_node failed. Searching chain for a better donor..."
         
