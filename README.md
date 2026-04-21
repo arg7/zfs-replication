@@ -1,4 +1,4 @@
-# Zep: ZFS Replication Manager
+# Zeplicator: Another ZFS Replication Manager
 
 A robust, cascading ZFS replication script designed for multi-node chains. It handles snapshot creation, incremental transfers with resume support, and graduated retention across the entire chain.
 
