@@ -307,7 +307,7 @@ zfsbud_core() {
        
        if [[ -n "$diff_output" ]]; then
            zbud_msg "🚨 FATAL: Data divergence (Split-Brain) detected on $remote_ds!"
-           zbud_msg "🚨 Production data was written after $last_snapshot_common."
+           zbud_msg "🚨 New data was written after $last_snapshot_common."
            zbud_msg "🚨 Changed files (preview):"
            while IFS= read -r line; do zbud_msg "  $line"; done <<< "$diff_output"
            zbud_msg "🚨 Aborting replication to prevent silent data destruction!"
