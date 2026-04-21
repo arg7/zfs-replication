@@ -194,6 +194,15 @@ if [[ "$CONFIG_MODE" == true ]]; then
     exit 0
 fi
 
+# Identity & Configuration Discovery
+REPL_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
+REPL_USER=$(get_zfs_prop "repl:user" "$local_ds")
+REPL_POLICY=$(get_zfs_prop "repl:policy" "$local_ds")
+REPL_SSH_TIMEOUT=$(resolve_ssh_timeout "$local_ds")
+REPL_TIMEOUT=$(resolve_proc_timeout "$local_ds")
+[[ -z "$REPL_USER" ]] && REPL_USER="root"
+[[ -z "$REPL_POLICY" || "$REPL_POLICY" == "-" ]] && REPL_POLICY="fail"
+
 # Handle Suspend/Resume logic
 if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
     ACTION="SUSPENDED"
@@ -400,16 +409,6 @@ if [[ -n "$sync_props_data" && "$PROMOTE" != true ]]; then
     fi
 fi
 
-# Identity & Configuration Discovery
-REPL_CHAIN=$(get_zfs_prop "repl:chain" "$local_ds")
-REPL_USER=$(get_zfs_prop "repl:user" "$local_ds")
-REPL_POLICY=$(get_zfs_prop "repl:policy" "$local_ds")
-REPL_SSH_TIMEOUT=$(resolve_ssh_timeout "$local_ds")
-REPL_TIMEOUT=$(resolve_proc_timeout "$local_ds")
-[[ -z "$REPL_USER" ]] && REPL_USER="root"
-[[ -z "$REPL_POLICY" || "$REPL_POLICY" == "-" ]] && REPL_POLICY="fail"
-
-[[ -n "$raw_dataset" ]] || die "dataset not specified"
 ME=$(get_local_alias "$local_ds" "$CLI_ALIAS")
 CLI_ALIAS="$ME" # Update global CLI_ALIAS with resolved value for lock file
 NEXT_HOP=""
