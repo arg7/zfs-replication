@@ -243,6 +243,11 @@ zfsbud_core() {
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
+        # Update lock file with destination info for progress monitoring
+        if [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
+            echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
+        fi
+
         set -o pipefail
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
         timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"

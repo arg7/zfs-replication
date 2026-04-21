@@ -1,6 +1,6 @@
 #!/bin/bash
 # zeplicator-standalone.sh - Compiled ZFS Replication Manager
-# Built on: Tue Apr 21 03:55:12 PM CEST 2026
+# Built on: Tue Apr 21 04:09:38 PM CEST 2026
 
 # --- BEGIN zfs-common.lib.sh ---
 
@@ -286,17 +286,62 @@ check_stuck_job() {
         local age=$((cur_time - m_time))
         
         if [[ "$age" -gt "$timeout_val" ]]; then
+            # Progress Check: Is data actually moving?
+            if check_replication_progress "$dataset"; then
+                zbud_msg "  ⏳ Job exceeded timeout ($((age/60)) min) but progress is being made. Skipping alert and letting it continue."
+                touch "$LOCKFILE" # Reset age to prevent constant re-checking
+                exit 0
+            fi
+
             if type send_smtp_alert >/dev/null 2>&1; then
                 send_smtp_alert "CRITICAL: ZFS replication job for $dataset ($label) is stuck. Lock file: $LOCKFILE. Age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
             fi
             die "ERR: Stuck job detected ($age seconds old) at $LOCKFILE. Alert sent."
         else
-            die "ERR: Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid"
+            # SILENT EXIT: Don't alert if it's just a normal overlap within timeout
+            zbud_msg "ℹ️  Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid. Skipping run."
+            exit 0
         fi
     done
 
     echo "$$" > "$LOCKFILE"
     trap 'rm -f "$LOCKFILE"' EXIT
+}
+
+check_replication_progress() {
+    local ds="$1"
+    [[ -f "$LOCKFILE" ]] || return 1
+    
+    # Read lock file: PID [TARGET_NODE] [TARGET_DS] [LAST_SIZE]
+    local lock_data=($(cat "$LOCKFILE" 2>/dev/null))
+    local pid="${lock_data[0]}"
+    local target_node="${lock_data[1]}"
+    local target_ds="${lock_data[2]}"
+    local last_size="${lock_data[3]:-0}"
+
+    [[ -z "$target_node" || -z "$target_ds" ]] && return 1
+
+    local fqdn=$(resolve_node_fqdn "$target_node" "$ds")
+    local user=$(resolve_node_user "$target_node" "$ds")
+    local ssh_t=$(resolve_ssh_timeout "$ds")
+
+    # Check for %recv dataset size on target
+    local current_size=$(ssh -o ConnectTimeout="$ssh_t" "${user}@${fqdn}" "zfs list -H -o used \"${target_ds}/%recv\" 2>/dev/null | grep -E '^[0-9]+' || echo 0")
+    
+    # If %recv doesn't exist (it returns 0), it might have just finished or not started
+    if [[ "$current_size" == "0" ]]; then
+        return 1 
+    fi
+
+    # If size has increased, it's making progress
+    if [[ "$current_size" -gt "$last_size" ]]; then
+        # Update lock file with new size and current timestamp (via touch)
+        echo "$pid $target_node $target_ds $current_size" > "$LOCKFILE"
+        return 0
+    fi
+
+    # No progress since last check
+    return 1
 }
 # --- END zfs-common.lib.sh ---
 
@@ -701,6 +746,11 @@ zfsbud_core() {
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
+        # Update lock file with destination info for progress monitoring
+        if [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
+            echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
+        fi
+
         set -o pipefail
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
         timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | mbuffer -q -r \"$RATE\" -m \"$BUF\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
