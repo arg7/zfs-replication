@@ -17,6 +17,47 @@ raw_dataset=""
 label="frequently"
 keep_fallback="10"
 
+usage() {
+    cat <<EOF
+zeplicator - Modular ZFS Replication Manager
+
+Usage:
+  $(basename "$0") <dataset> [label] [keep_fallback] [flags]
+
+Positional Arguments:
+  <dataset>         The ZFS dataset to replicate (e.g., tank/data).
+                    Can be a remote alias if 'repl:node:<alias>:fs' is set.
+  [label]           Snapshot label to filter/create (default: frequently).
+  [keep_fallback]   Default number of snapshots to keep if not configured (default: 10).
+
+Primary Flags:
+  --dry-run         Simulate the entire replication chain without making changes.
+                    Mocks snapshot creation, transfers, property sync, and rotation.
+  --auto            Automatically resolve latest common snapshot during promotion.
+  --promote         Promote the local node to Master in the replication chain.
+  --initial         Perform an initial replication (uses full stream, mbuffer/zstd).
+  --suspend/resume  Suspend or resume replication across the entire chain.
+  --config          Enter configuration mode to view/set/clear 'repl:' ZFS properties.
+  --alias <name>    Manually specify the local node alias (overrides hostname detection).
+
+Advanced Flags:
+  --mark-only       Only perform rotation/cleanup of already shipped snapshots.
+  --destroy-chain   Force a fresh start when promoting if no common ground exists.
+  --snap <name>     Specify a literal snapshot name to use for promotion/rollback.
+  --target <node>   Point-to-point transfer to a specific node (ignores chain).
+  --donor           Run as a donor peer to heal a downstream node.
+  -y                Assume 'yes' for destructive operations (promotion/rollback).
+  --help, -h        Show this help message.
+
+Configuration Examples:
+  Set chain:      zfs set repl:chain=node1,node2,node3 tank/data
+  Set retention:  zfs set repl:node:node1:keep:frequently=30 tank/data
+  View config:    zeplicator tank/data --config
+
+EOF
+    exit 0
+}
+
 MARK_ONLY=false
 initial_send=false
 PROMOTE=false
@@ -42,6 +83,7 @@ CLI_ALIAS=""
 positional_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h) usage ;;
         --alias) CLI_ALIAS="$2"; shift 2 ;;
         --mark-only) MARK_ONLY=true; shift ;;
         --initial) initial_send=true; shift ;;
@@ -79,7 +121,7 @@ if [[ ${#positional_args[@]} -gt 0 ]]; then raw_dataset="${positional_args[0]}";
 if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
 if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
 
-[[ -n "$raw_dataset" ]] || die "dataset not specified"
+[[ -n "$raw_dataset" ]] || usage
 
 # Early local dataset resolution
 my_hostname=$(get_local_alias "$raw_dataset" "$CLI_ALIAS")
