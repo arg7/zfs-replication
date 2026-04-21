@@ -469,8 +469,14 @@ fi
 LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*$label" | head -n 1 | cut -d'@' -f2)
 
 # 2. Replication & Audit
+# 2. Replication & Audit
 REPLICATION_SUCCESS=false
-for hop_node in "${NODES_REMAINING[@]}"; do
+HAD_SPLIT_BRAIN=false
+hop_idx=0
+while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
+    hop_node="${NODES_REMAINING[$hop_idx]}"
+    hop_idx=$((hop_idx + 1))
+    
     hop_fqdn=$(resolve_node_fqdn "$hop_node" "$raw_dataset")
     hop_user=$(resolve_node_user "$hop_node" "$raw_dataset")
     HOP_TARGET="${hop_user}@${hop_fqdn}"
@@ -499,7 +505,11 @@ for hop_node in "${NODES_REMAINING[@]}"; do
         echo "${CHAIN_PREFIX}  ✅ Replication to $HOP_TARGET successful."
         TRANSFER_DONE=true
     elif [[ $ZBUD_STATUS -eq 2 ]]; then
+        HAD_SPLIT_BRAIN=true
         if [[ "$REPL_POLICY" == "resilience" ]]; then
+            if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
+                die "🚨 FATAL: Split-Brain detected on Sink node $hop_node. Aborting replication branch." 2
+            fi
             echo "${CHAIN_PREFIX}  🚨 FATAL: Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
             TRANSFER_DONE=false
             continue
@@ -564,11 +574,16 @@ for hop_node in "${NODES_REMAINING[@]}"; do
             SSH_STATUS=$?
 
             if [[ $SSH_STATUS -eq 2 ]]; then
+                HAD_SPLIT_BRAIN=true
                 echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"
                 if [[ "$REPL_POLICY" == "resilience" ]]; then
-                    echo "${CHAIN_PREFIX}  ⚠️  WARNING: Split-Brain detected downstream from $hop_node. Continuing due to policy=resilience..."
-                    # We continue the outer loop to the next hop_node
-                    continue
+                    echo "${CHAIN_PREFIX}  ⚠️  WARNING: Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
+                    # SKIP all nodes that were supposed to be handled by this hop
+                    # In a linear chain, these are all remaining nodes in the REPL_CHAIN after hop_node
+                    # But we only skip nodes that are already in OUR NODES_REMAINING list.
+                    # Since NODES_REMAINING is sorted, we just skip until the end of the chain.
+                    # If we had branching, we'd need more complex logic.
+                    break 
                 else
                     die "🚨 FATAL: Split-Brain detected downstream from $hop_node. Aborting entire replication job." 2
                 fi
@@ -622,7 +637,9 @@ if [[ "$REPLICATION_SUCCESS" == true ]]; then
         echo "SENT_LIST:$MY_LIST"
     fi
 elif [[ ${#NODES_REMAINING[@]} -gt 0 ]]; then
-    die "ERR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}"
+    exit_code=1
+    if [[ "$HAD_SPLIT_BRAIN" == true ]]; then exit_code=2; fi
+    die "ERR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}" $exit_code
 else
     if [[ "$IS_DONOR" == true ]]; then
         echo "${CHAIN_PREFIX}  ℹ️  Donor run complete."
