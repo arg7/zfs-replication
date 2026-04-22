@@ -61,6 +61,8 @@ The following packages must be installed on all nodes:
 | `zep:zfs:raw` | Whether to use `zfs send -w` (raw, includes properties). Default: `false`. | `true` |
 | `zep:zfs:resume` | Whether to use `zfs recv -s` (resume support). Default: `false`. | `true` |
 | `zep:zfs:force` | If `false`, omits `-F` from `zfs receive` (Safe Mode). Default: `true`. | `false` |
+| `zep:throttle` | Bandwidth limit for `mbuffer` (e.g., `100M`, `1G`). Uses `-R`. | `50M` |
+| `zep:mbuffer_size` | Size of `mbuffer` in-memory buffer. Default: `64M`. | `256M` |
 
 ### Configuration Management (`--config`)
 
