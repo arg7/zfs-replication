@@ -34,7 +34,11 @@ send_smtp_alert() {
     fi
 
     local current_time=$(date +%s)
-    local threshold=1800 # 30 minutes
+    local threshold_str=$(get_zfs_prop "zep:alert:threshold" "$dataset")
+    local threshold=1800
+    if [[ "$threshold_str" != "-" ]]; then
+        threshold=$(parse_time_to_seconds "$threshold_str")
+    fi
     local elapsed=$((current_time - last_sent))
 
     if [[ $elapsed -lt $threshold && $last_sent -gt 0 ]]; then
