@@ -50,8 +50,9 @@ The following packages must be installed on all nodes:
    ```bash
    git clone https://github.com/arg7/zfs-replication.git
    cd zfs-replication
-   make  # Generates build/zep
-   ln -s $(pwd)/zep-standalone.sh /usr/local/bin/zep
+   make  # Generates build/zep and build/iomon
+   ln -s $(pwd)/build/zep /usr/local/bin/zep
+   ln -s $(pwd)/build/iomon /usr/local/bin/iomon
    ```
 
 2. **SSH Connectivity**:
