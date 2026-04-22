@@ -583,7 +583,6 @@ if [[ "$MARK_ONLY" == true ]]; then
 fi
 
 dataset="$local_ds"
-check_stuck_job
 
 # 1. Snapshot creation (Master only)
 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
@@ -612,6 +611,8 @@ else
         echo "${CHAIN_PREFIX}  ℹ️  Not a master host ($ME), skipping snapshot creation."
     fi
 fi
+
+check_stuck_job
 
 LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@.*$label" | head -n 1 | cut -d'@' -f2)
 if [[ "$DRY_RUN" == true && -n "$VIRTUAL_SNAP_CREATED" ]]; then
