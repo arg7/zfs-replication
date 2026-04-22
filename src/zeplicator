@@ -185,6 +185,20 @@ fi
 # Handle Configuration logic
 handle_config() {
     local args=("$@")
+
+    expand_shorthand() {
+        local k="$1"
+        if [[ "$k" != zep:* ]]; then
+            if [[ "$k" == smtp:* ]]; then
+                echo "zep:smtp_${k#*:}"
+            else
+                echo "zep:$k"
+            fi
+        else
+            echo "$k"
+        fi
+    }
+
     if [[ ${#args[@]} -eq 0 || "${args[0]}" == "--list" ]]; then
         echo "  📋 Current Configuration for $dataset:"
         zfs get all -H -o property,value "$dataset" | grep "^zep:" | sed 's/^zep://' | sort | awk -F'\t' '{ printf "      %-30s %s\n", $1, $2 }'
@@ -200,7 +214,7 @@ handle_config() {
             [[ -z "$fname" || "$fname" == -* ]] && die "Missing filename for --export"
             
             echo "  💾 Exporting configuration to $fname..."
-            zfs get all -H -o property,value "$dataset" | grep "^zep:" | awk '{print $1"="$2}' > "$fname"
+            zfs get all -H -o property,value "$dataset" | grep "^zep:" | awk -F'\t' '{print $1"="$2}' > "$fname"
             i=$((i + 2))
             continue
         fi
@@ -219,13 +233,7 @@ handle_config() {
                     local key="${line%%=*}"
                     local val="${line#*=}"
                     
-                    if [[ "$key" != zep:* ]]; then
-                        if [[ "$key" == smtp:* ]]; then
-                            key="zep:smtp_${key#*:}"
-                        else
-                            key="zep:$key"
-                        fi
-                    fi
+                    key=$(expand_shorthand "$key")
                     
                     echo "  ⚙️  Setting $key=$val on $dataset"
                     zfs set "$key=$val" "$dataset" || echo "    ⚠️  Failed to set $key"
@@ -239,9 +247,7 @@ handle_config() {
             local key="${args[((i+1))]}"
             [[ -z "$key" ]] && die "Missing property key to clear"
             
-            # Shorthand mapping
-            local full_key="zep:$key"
-            if [[ "$key" == smtp:* ]]; then full_key="zep:smtp_${key#*:}"; fi
+            local full_key=$(expand_shorthand "$key")
 
             echo "  ⚙️  Clearing $full_key from $dataset..."
             zfs inherit "$full_key" "$dataset" || echo "    ⚠️  Failed to clear $full_key"
@@ -253,11 +259,7 @@ handle_config() {
             local key="${arg%%=*}"
             local val="${arg#*=}"
             
-            # Shorthand mapping
-            local full_key="zep:$key"
-            if [[ "$key" == smtp:* ]]; then
-                full_key="zep:smtp_${key#*:}";
-            fi
+            local full_key=$(expand_shorthand "$key")
             
             echo "  ⚙️  Setting $full_key=$val on $dataset"
             zfs set "$full_key"="$val" "$dataset" || echo "    ⚠️  Failed to set $full_key"
