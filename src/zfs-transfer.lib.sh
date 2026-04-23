@@ -378,49 +378,92 @@ zfsbud_core() {
        fi
     else
        # CHECK DATA DIVERGENCE (Split-Brain Safety Check)
+       # We perform a comprehensive check to see if anything changed between the common snapshot and the current head.
+       # If divergence is found, we break it down to show exactly where it happened.
+       
+       local check_cmd='
+           ds="'$remote_ds'"
+           common="'$remote_ds@$last_snapshot_common'"
+           
+           # Ensure chronological order (oldest to newest)
+           chron_list=$(zfs list -t snapshot -o name,written -H -S creation -r "$ds" | tac)
+           
+           found_common="false"
+           prev="$common"
+           found_divergence="false"
+           report="🚨 Divergence report:\n"
+           
+           while read -r name written; do
+               [[ -z "$name" ]] && continue
+               if [[ "$found_common" == "false" ]]; then
+                   if [[ "$name" == "$common" ]]; then found_common="true"; fi
+                   continue
+               fi
+               # We are after common snap
+               if [[ "$written" != "0" && "$written" != "-" ]]; then
+                   found_divergence="true"
+                   report+="    - $name written $written, diff:\n"
+                   zfs mount "$ds" 2>/dev/null
+                   diff_text=$(zfs diff "$prev" "$name" 2>/dev/null | head -n 15 | awk "{print \"      |  \" \$0}")
+                   if [[ -z "$diff_text" ]]; then
+                       diff_text="      |  (No diff output available)"
+                   fi
+                   report+="${diff_text}\n"
+               fi
+               prev="$name"
+           done <<< "$chron_list"
+           
+           # Check dataset head
+           head_written=$(zfs get -H -o value written "$ds" 2>/dev/null)
+           if [[ "$head_written" != "0" && "$head_written" != "-" && -n "$head_written" ]]; then
+               found_divergence="true"
+               report+="    - $ds (head) written $head_written, diff:\n"
+               zfs mount "$ds" 2>/dev/null
+               diff_text=$(zfs diff "$prev" "$ds" 2>/dev/null | head -n 15 | awk "{print \"      |  \" \$0}")
+               if [[ -z "$diff_text" ]]; then
+                   diff_text="      |  (No diff output available)"
+               fi
+               report+="${diff_text}\n"
+           fi
+           
+           if [[ "$found_divergence" == "true" ]]; then
+               echo -e "$report"
+               exit 2
+           fi
+           
+           # Final safety check: generic diff if written was somehow deceptive or unavailable
+           zfs mount "$ds" 2>/dev/null
+           generic_diff=$(zfs diff "$common" "$ds" 2>/dev/null | head -n 1)
+           if [[ -n "$generic_diff" ]]; then
+               echo -e "🚨 Divergence report:\n - $ds (head) detected via zfs diff, diff:"
+               zfs diff "$common" "$ds" 2>/dev/null | head -n 15 | awk "{print \"   |  \" \$0}"
+               exit 2
+           fi
+       '
+
        local diff_output=""
-       local diff_cmd="set -o pipefail; zfs diff $remote_ds@$last_snapshot_common $remote_ds | head -n 20"
-       local mount_cmd="zfs mount $remote_ds 2>/dev/null"
+       local diff_status=0
        
        if [ -n "$remote_shell" ]; then
-           # First try: simple diff
-           diff_output=$($remote_shell "$diff_cmd" 2>/dev/null)
-           local diff_status=$?
-           
-           if [[ $diff_status -ne 0 ]]; then
-               # If diff failed, try mounting then diff again
-               diff_output=$($remote_shell "$mount_cmd; $diff_cmd" 2>/dev/null)
-               diff_status=$?
-           fi
-           
-           if [[ $diff_status -eq 0 && -z "$diff_output" ]]; then
-              # Secondary check via 'written' property if zfs diff is empty
-              local written=$($remote_shell "zfs get -H -o value written $remote_ds@$last_snapshot_common" 2>/dev/null)
-              [[ "$written" != "0" && "$written" != "-" && -n "$written" ]] && diff_output="[WRITTEN] $written bytes modified since $last_snapshot_common"
-           fi
+           diff_output=$($remote_shell "$check_cmd" 2>&1)
+           diff_status=$?
        else
-           # Local execution
-           diff_output=$(bash -c "set -o pipefail; zfs diff \"$remote_ds@$last_snapshot_common\" \"$remote_ds\" 2>/dev/null | head -n 20")
-           local diff_status=$?
-           
-           if [[ $diff_status -ne 0 ]]; then
-               zfs mount "$remote_ds" 2>/dev/null
-               diff_output=$(bash -c "set -o pipefail; zfs diff \"$remote_ds@$last_snapshot_common\" \"$remote_ds\" 2>/dev/null | head -n 20")
-               diff_status=$?
-           fi
-           
-           if [[ $diff_status -eq 0 && -z "$diff_output" ]]; then
-              local written=$(zfs get -H -o value written "$remote_ds@$last_snapshot_common" 2>/dev/null)
-              [[ "$written" != "0" && "$written" != "-" && -n "$written" ]] && diff_output="[WRITTEN] $written bytes modified since $last_snapshot_common"
-           fi
+           diff_output=$(eval "$check_cmd" 2>&1)
+           diff_status=$?
        fi
-       
-       if [[ -n "$diff_output" ]]; then
+
+       if [[ $diff_status -eq 2 ]]; then
            zbud_msg "🚨 FATAL: Data divergence (Split-Brain) detected on $remote_ds!"
-           zbud_msg "🚨 New data was written after $last_snapshot_common."
-           zbud_msg "🚨 Changed files (preview):"
            while IFS= read -r line; do zbud_msg "  $line"; done <<< "$diff_output"
            zbud_msg "🚨 Aborting replication to prevent silent data destruction!"
+           
+           # Generate specific rollback hint
+           local hint_msg="HINT: Data divergence (Split-Brain) detected on ${hop_node:-destination} ${remote_ds} dataset.|HINT_NL|"
+           hint_msg+="To realign the affected node without destroying the rest of the chain,|HINT_NL|"
+           hint_msg+="log into ${hop_node:-the destination node} and manually rollback its dataset to the last common snapshot:|HINT_NL|"
+           hint_msg+="  zfs rollback -r ${remote_ds}@${last_snapshot_common}"
+           
+           echo "$hint_msg" > /tmp/zfs-replication.hint
            
            # Get offending snapshots if any, to include in the alert
            local offending_snaps=""
@@ -437,11 +480,10 @@ zfsbud_core() {
                done
            fi
            
-           local alert_msg="CRITICAL: Split-Brain Data Divergence on $remote_ds\nData was written to $remote_ds after $last_snapshot_common. Replication aborted to prevent data loss.\n\nData Divergence (preview):\n$diff_output"
+           local alert_msg="CRITICAL: Split-Brain Data Divergence on $remote_ds\n$diff_output"
            if [[ -n "$offending_snaps" ]]; then
-               alert_msg+="\n\nSnapshot Divergence (offending snapshots):$offending_snaps"
+               alert_msg+="\n\nFull Snapshot Timeline (after common point):$offending_snaps"
            fi
-           # Write to error log to ensure it's picked up by send_smtp_alert 'Error Details' block
            echo -e "$alert_msg" > /tmp/zfs-replication.err
            send_smtp_alert "critical" "CRITICAL: Split-Brain Data Divergence on $remote_ds"
            return 2
@@ -456,8 +498,6 @@ zfsbud_core() {
            zbud_msg "  ℹ️  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
            if [[ "$REPL_FORCE" != "false" ]]; then
                zbud_msg "  ℹ️  Using 'zfs recv -F' to sync."
-           else
-               zbud_msg "  ℹ️  Force is disabled, but no data divergence detected. Proceeding with replication."
            fi
        fi
        send_incremental "$remote_ds" || return 1

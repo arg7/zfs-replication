@@ -237,16 +237,22 @@ die() {
     local exit_code=${2:-1}
     zbud_msg "❌ ERROR: $msg"
 
-    if [[ -n "$local_ds" ]]; then
+    if [[ -n "$local_ds" && "$CASCADED" != true && "$exit_code" -ne 2 ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then
             send_smtp_alert "critical" "ERROR: $msg"
         fi
     fi
-    if [[ "$CASCADED" != true && "$exit_code" -eq 2 ]]; then
-        echo "HINT: If replication failed due to divergent snapshots, try recovery options:"
-        echo "  --promote --auto [-y]         (Auto-discover latest common snapshot and rollback chain)"
-        echo "  --promote --snap <name> [-y]  (Rollback chain to specific snapshot)"
-        echo "  --promote --destroy-chain     (DANGER: Destroy downstream datasets and start over)"
+    if [[ "$CASCADED" != true ]]; then
+        echo ""
+        if [[ -f "/tmp/zfs-replication.hint" ]]; then
+            cat /tmp/zfs-replication.hint | sed 's/|HINT_NL|/\n/g'
+            rm -f "/tmp/zfs-replication.hint"
+        elif [[ "$exit_code" -eq 1 ]]; then
+            echo "HINT: If replication failed because there is no common ground:"
+            echo "  - For a new destination: try adding the '--initial' flag."
+            echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
+            echo "  - To force a fresh start (DANGER): use '--promote --destroy-chain' on the Master."
+        fi
     fi
     exit $exit_code
 }
