@@ -20,8 +20,11 @@ get_node_state() {
             props=$(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
             if [[ -n "$props" ]]; then
                 # Find unique labels for this dataset
-                labels=$(zfs list -t snap -o name -H -r "$ds" 2>/dev/null | grep "zeplicator_" | cut -d"@" -f2 | cut -d"_" -f2 | cut -d"-" -f1 | sort -u)
+                snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "zeplicator_")
+                labels=$(echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | cut -d"_" -f2 | cut -d"-" -f1 | sort -u)
                 for label in $labels; do
+                    [[ -z "$label" ]] && continue
+                    
                     # Get configured status and heartbeat
                     is_configured="false"
                     heartbeat=$(echo "$props" | grep ":alert:heartbeat:${label}" | cut -f2)
@@ -29,7 +32,7 @@ get_node_state() {
                         is_configured="true"
                     fi
 
-                    latest=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "zeplicator_${label}-" | head -n 1)
+                    latest=$(echo "$snap_list" | grep "zeplicator_${label}-" | head -n 1)
                     if [[ -n "$latest" ]]; then
                         snap_name=$(echo "$latest" | awk "{print \$1}")
                         then=$(echo "$latest" | awk "{print \$2}")
