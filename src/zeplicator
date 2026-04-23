@@ -181,11 +181,67 @@ fi
 
 filesystem=$local_ds # Ensure helper functions use the local path
 
+# Setup cleanup trap early
+trap cleanup EXIT
+
+# Optimization: Cache ZFS properties for the local dataset
+cache_zfs_prop "$filesystem" "$my_hostname"
+
 # Handle Status logic
 if [[ "$STATUS_MODE" == true ]]; then
     cmd_status "$raw_filesystem"
     exit $?
 fi
+
+# Sync properties to nodes across the entire chain
+sync_chain_props() {
+    local ds_path=$1
+    local target_nodes_ref=$2
+    eval "local target_nodes=(\"\${$target_nodes_ref[@]}\")"
+    local props_encoded=$(get_repl_props_encoded "$ds_path")
+    local props_decoded=$(echo -n "$props_encoded" | base64 -d)
+    local unreachable=()
+
+    echo "  ⚙️  Syncing replication properties..."
+    for n in "${target_nodes[@]}"; do
+        [[ "$n" == "$my_hostname" ]] && continue
+        local n_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
+        local n_user=$(resolve_node_user "$n" "$raw_filesystem")
+        local n_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
+        echo -n "    - $n ($n_fqdn)... "
+        
+            ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF >/dev/null 2>&1
+            # Optimization: Cache ZFS properties for the remote dataset during sync
+            ds_safe="\${n_ds//\//-}"
+            export PROP_CACHE_FILE="/tmp/zfs-prop-cache-\${n}-\${ds_safe}-\\\$\\\$.txt"
+            trap 'rm -f "\$PROP_CACHE_FILE"' EXIT
+            zfs get all -H -o property,value "$n_ds" 2>/dev/null | grep "^zep:" | grep -vE ":(shipped|alias|suspend)\$" > "\$PROP_CACHE_FILE" || true
+            IFS=';' read -ra props <<< "$props_decoded"
+            for p in "\${props[@]}"; do
+                [[ -z "\$p" ]] && continue
+                k="\${p%%=*}"
+                v="\${p#*=}"
+                
+                # Check cache first
+                curr=\$(grep -w "^\$k" "\$PROP_CACHE_FILE" | cut -f2 | head -n 1)
+                [[ -z "\$curr" ]] && curr=\$(zfs get -H -o value "\$k" "$n_ds" 2>/dev/null)
+
+                if [[ "\$curr" != "\$v" ]]; then
+                    zfs set "\$p" "$n_ds"
+                fi
+            done
+EOF
+        if [[ $? -eq 0 ]]; then
+            echo "✅"
+        else
+            echo "❌"
+            unreachable+=("$n")
+        fi
+    done
+    
+    echo ""
+    return ${#unreachable[@]}
+}
 
 # Handle Configuration logic
 handle_config() {
@@ -273,6 +329,20 @@ handle_config() {
         fi
         i=$((i + 1))
     done
+
+    # Refresh cache before syncing to other nodes
+    cache_zfs_prop "$filesystem" "$my_hostname"
+
+    # After all changes, sync to the entire chain if it's configured
+    local current_chain=$(get_zfs_prop "zep:chain" "$filesystem")
+    if [[ -n "$current_chain" && "$current_chain" != "-" ]]; then
+        IFS=',' read -r -a nodes <<< "$current_chain"
+        if sync_chain_props "$filesystem" "nodes"; then
+            echo "  🎉 SUCCESS: Configuration updated and synced across the chain."
+        else
+            echo "  ⚠️  PARTIAL SUCCESS: Configuration updated, but some nodes were unreachable during sync."
+        fi
+    fi
 }
 
 if [[ "$CONFIG_MODE" == true ]]; then
@@ -317,52 +387,6 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
     send_smtp_alert "info" "NOTICE: ZFS Replication has been ${ACTION} for filesystem $raw_filesystem on $my_hostname. Master node: ${nodes[0]}. New state: zep:suspend=$VAL"
     exit 0
 fi
-
-# Sync properties to nodes during promotion
-sync_promotion_props() {
-    local ds_path=$1
-    local target_nodes_ref=$2
-    eval "local target_nodes=(\"\${$target_nodes_ref[@]}\")"
-    local props_encoded=$(get_repl_props_encoded "$ds_path")
-    local props_decoded=$(echo -n "$props_encoded" | base64 -d)
-    local unreachable=()
-
-    echo "  ⚙️  Syncing replication properties..."
-    for n in "${target_nodes[@]}"; do
-        [[ "$n" == "$my_hostname" ]] && continue
-        local n_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
-        local n_user=$(resolve_node_user "$n" "$raw_filesystem")
-        local n_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
-        echo -n "    - $n ($n_fqdn)... "
-        
-        ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF >/dev/null 2>&1
-            IFS=';' read -ra props <<< "$props_decoded"
-            for p in "\${props[@]}"; do
-                [[ -z "\$p" ]] && continue
-                k="\${p%%=*}"
-                v="\${p#*=}"
-                curr=\$(zfs get -H -o value "\$k" "$n_ds" 2>/dev/null)
-                if [[ "\$curr" != "\$v" ]]; then
-                    zfs set "\$p" "$n_ds"
-                fi
-            done
-EOF
-        if [[ $? -eq 0 ]]; then
-            echo "✅"
-        else
-            echo "❌"
-            unreachable+=("$n")
-        fi
-    done
-    
-    echo ""
-    if [[ ${#unreachable[@]} -eq 0 ]]; then
-        echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
-    else
-        echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable: ${unreachable[*]}"
-        echo "     Replication will attempt to heal them during the next cycle."
-    fi
-}
 
 # Handle Promotion logic
 if [[ "$PROMOTE" == true ]]; then
@@ -502,7 +526,12 @@ if [[ "$PROMOTE" == true ]]; then
             zfs set zep:chain="$NEW_CHAIN" "$local_ds"
             send_smtp_alert "info" "NOTICE: Node $my_hostname has been PROMOTED to Master for filesystem $raw_filesystem. New chain: $NEW_CHAIN"
 
-            sync_promotion_props "$local_ds" "NEW_NODES"
+            if sync_chain_props "$local_ds" "NEW_NODES"; then
+                echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+            else
+                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable during property sync."
+                echo "     Replication will attempt to heal them during the next cycle."
+            fi
             exit 0
         fi
     fi
@@ -513,7 +542,12 @@ if [[ "$PROMOTE" == true ]]; then
         zfs set zep:chain="$NEW_CHAIN" "$local_ds"
         send_smtp_alert "info" "NOTICE: Node $my_hostname has been PROMOTED to Master for filesystem $raw_filesystem. New chain: $NEW_CHAIN"
 
-        sync_promotion_props "$local_ds" "NEW_NODES"
+        if sync_chain_props "$local_ds" "NEW_NODES"; then
+            echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+        else
+            echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable during property sync."
+            echo "     Replication will attempt to heal them during the next cycle."
+        fi
         exit 0
     fi
 fi 
@@ -818,7 +852,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
             if [[ "$ZEP_BW" == "true" ]]; then casc_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then casc_opts+=" --force-color"; fi
-            PROPS_ARG=$(get_repl_props_encoded "$local_ds")
+            
+            PROPS_ARG=""
+            if [[ "$initial_send" == true ]]; then
+                PROPS_ARG="--sync-props $(get_repl_props_encoded "$local_ds")"
+            fi
             
             # Internal list of what arrived here (including virtual snaps)
             MY_ARRIVED=""
@@ -836,7 +874,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             fi
 
             # We pass the prefix to maintain the visual tree across SSH hops
-            DOWNSTREAM_OUT=$(timeout "$((REPL_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $casc_opts --sync-props $PROPS_ARG --snap-list \"$MY_ARRIVED\" --cascaded" 2>&1)
+            DOWNSTREAM_OUT=$(timeout "$((REPL_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $casc_opts $PROPS_ARG --snap-list \"$MY_ARRIVED\" --cascaded" 2>&1)
             SSH_STATUS=$?
             
             # Extract HINT_EXPORT if present and remove it from standard output

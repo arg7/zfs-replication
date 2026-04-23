@@ -5,8 +5,27 @@
 get_zfs_prop() {
     local prop=$1
     local ds=$2
+
+    if [[ -n "$PROP_CACHE_FILE" && -f "$PROP_CACHE_FILE" ]]; then
+        local val=$(grep -w "^$prop" "$PROP_CACHE_FILE" | cut -f2 | head -n 1)
+        if [[ -n "$val" ]]; then
+            echo "$val"
+            return 0
+        fi
+    fi
+
     local val=$(zfs get -H -o value "$prop" "$ds" 2>/dev/null | head -n 1)
     [[ -z "$val" ]] && echo "-" || echo "$val"
+}
+
+cache_zfs_prop() {
+    local ds="$1"
+    local node="$2"
+    local ds_safe="${ds//\//-}"
+    PROP_CACHE_FILE="/tmp/zfs-prop-cache-${node}-${ds_safe}-${$}.txt"
+    export PROP_CACHE_FILE
+    # Capture all zep: properties, excluding node-specific and transient state like 'shipped'
+    zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:" | grep -vE ":(shipped|alias|suspend)$" > "$PROP_CACHE_FILE" || true
 }
 
 # Get the local node alias (using cli override, hostname in chain, fqdn match, or hostname as fallback)
@@ -189,8 +208,13 @@ resolve_node_filesystem() {
 
 get_repl_props_encoded() {
     local ds=$1
-    # Get all zep: properties, filter out node-specific ones like alias and suspend
-    local props=$(zfs get all -H -o property,value "$ds" | grep "^zep:" | grep -vE "zep:(alias|suspend)" | awk '{print $1"="$2}' | tr '\n' ';')
+    local props=""
+    # Use cache if available for faster property gathering, ensuring we never propagate node-local state
+    if [[ -n "$PROP_CACHE_FILE" && -f "$PROP_CACHE_FILE" ]]; then
+        props=$(grep "^zep:" "$PROP_CACHE_FILE" | awk '{print $1"="$2}' | tr '\n' ';')
+    else
+        props=$(zfs get all -H -o property,value "$ds" | grep "^zep:" | grep -vE ":(shipped|alias|suspend)$" | awk '{print $1"="$2}' | tr '\n' ';')
+    fi
     echo -n "$props" | base64 -w 0
 }
 
@@ -204,13 +228,14 @@ apply_repl_props() {
     IFS=';' read -ra props <<< "$decoded"
     for p in "${props[@]}"; do
         if [[ -n "$p" ]]; then
-            local current_val=$(zfs get -H -o value "${p%%=*}" "$ds" 2>/dev/null)
+            local prop_key="${p%%=*}"
+            local current_val=$(get_zfs_prop "$prop_key" "$ds")
             local new_val="${p#*=}"
             if [[ "$current_val" != "$new_val" ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
-                    echo -e "${CHAIN_PREFIX}    [DRY RUN] Would update ${p%%=*} -> $new_val"
+                    echo -e "${CHAIN_PREFIX}    [DRY RUN] Would update $prop_key -> $new_val"
                 else
-                    echo -e "${CHAIN_PREFIX}    Updating ${p%%=*} -> $new_val"
+                    echo -e "${CHAIN_PREFIX}    Updating $prop_key -> $new_val"
                     zfs set "$p" "$ds" || echo -e "${CHAIN_PREFIX}    Warning: Failed to set $p"
                 fi
             fi
@@ -284,6 +309,11 @@ die() {
     exit $exit_code
 }
 
+cleanup() {
+    [[ -n "$LOCKFILE" ]] && rm -f "$LOCKFILE" "${LOCKFILE}.cnt"
+    [[ -n "$PROP_CACHE_FILE" ]] && rm -f "$PROP_CACHE_FILE"
+}
+
 check_stuck_job() {
     local lock_suffix=""
     [[ -n "$CLI_ALIAS" ]] && lock_suffix="-${CLI_ALIAS}"
@@ -345,7 +375,7 @@ check_stuck_job() {
     done
 
     echo "$$" > "$LOCKFILE"
-    trap 'rm -f "$LOCKFILE" "${LOCKFILE}.cnt"' EXIT
+    trap cleanup EXIT
 }
 
 # High-performance pipe monitor to track bytes and update progress file
