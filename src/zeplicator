@@ -734,6 +734,17 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         else
             die "🚨 FATAL: Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
         fi
+    elif [[ $ZBUD_STATUS -eq 3 ]]; then
+        if [[ "$REPL_POLICY" == "resilience" ]]; then
+            if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
+                die "🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
+            fi
+            echo "${CHAIN_PREFIX}  🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
+            TRANSFER_DONE=false
+            continue
+        else
+            die "🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
+        fi
     else
         echo "${CHAIN_PREFIX}  ⚠️  WARNING: Local replication to $hop_node failed. Searching chain for a better donor..."
         

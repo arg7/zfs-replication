@@ -286,16 +286,28 @@ zfsbud_core() {
         fi
 
         set -o pipefail
+        # Clear error log
+        > /tmp/zfs-replication.err
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
         timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then
            zbud_msg "Pipeline failed with status $status"
+           if [[ -f /tmp/zfs-replication.err ]]; then
+               while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < /tmp/zfs-replication.err
+           fi
            return 1
         fi
       else
-        ! timeout "$timeout_val" bash -c "zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+        > /tmp/zfs-replication.err
+        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && {
+           zbud_msg "Pipeline failed"
+           if [[ -f /tmp/zfs-replication.err ]]; then
+               while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < /tmp/zfs-replication.err
+           fi
+           return 1
+        }
       fi
 
       local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
@@ -367,10 +379,40 @@ zfsbud_core() {
     else
        # CHECK DATA DIVERGENCE (Split-Brain Safety Check)
        local diff_output=""
+       local diff_cmd="set -o pipefail; zfs diff $remote_ds@$last_snapshot_common $remote_ds | head -n 20"
+       local mount_cmd="zfs mount $remote_ds 2>/dev/null"
+       
        if [ -n "$remote_shell" ]; then
-           diff_output=$($remote_shell "zfs diff $remote_ds@$last_snapshot_common $remote_ds | head -n 20" 2>/dev/null)
+           # First try: simple diff
+           diff_output=$($remote_shell "$diff_cmd" 2>/dev/null)
+           local diff_status=$?
+           
+           if [[ $diff_status -ne 0 ]]; then
+               # If diff failed, try mounting then diff again
+               diff_output=$($remote_shell "$mount_cmd; $diff_cmd" 2>/dev/null)
+               diff_status=$?
+           fi
+           
+           if [[ $diff_status -eq 0 && -z "$diff_output" ]]; then
+              # Secondary check via 'written' property if zfs diff is empty
+              local written=$($remote_shell "zfs get -H -o value written $remote_ds@$last_snapshot_common" 2>/dev/null)
+              [[ "$written" != "0" && "$written" != "-" && -n "$written" ]] && diff_output="[WRITTEN] $written bytes modified since $last_snapshot_common"
+           fi
        else
-           diff_output=$(zfs diff "$remote_ds@$last_snapshot_common" "$remote_ds" 2>/dev/null | head -n 20)
+           # Local execution
+           diff_output=$(bash -c "set -o pipefail; zfs diff \"$remote_ds@$last_snapshot_common\" \"$remote_ds\" 2>/dev/null | head -n 20")
+           local diff_status=$?
+           
+           if [[ $diff_status -ne 0 ]]; then
+               zfs mount "$remote_ds" 2>/dev/null
+               diff_output=$(bash -c "set -o pipefail; zfs diff \"$remote_ds@$last_snapshot_common\" \"$remote_ds\" 2>/dev/null | head -n 20")
+               diff_status=$?
+           fi
+           
+           if [[ $diff_status -eq 0 && -z "$diff_output" ]]; then
+              local written=$(zfs get -H -o value written "$remote_ds@$last_snapshot_common" 2>/dev/null)
+              [[ "$written" != "0" && "$written" != "-" && -n "$written" ]] && diff_output="[WRITTEN] $written bytes modified since $last_snapshot_common"
+           fi
        fi
        
        if [[ -n "$diff_output" ]]; then
@@ -408,17 +450,14 @@ zfsbud_core() {
        # RESOLVE SNAPSHOT DIVERGENCE:
        # If there are newer snapshots on destination but NO data divergence was detected above,
        # it means these snapshots are just points on the same timeline (e.g. auto-snapshots).
-       # 'zfs recv -F' will handle them. We only roll back if we absolutely must or if 
-       # it's a known diverged state (but we handle split-brain separately above).
        
        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
-           # Instead of pre-emptive rollback, we'll let 'zfs recv -F' handle it (if enabled).
            zbud_msg "  ℹ️  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
            if [[ "$REPL_FORCE" != "false" ]]; then
                zbud_msg "  ℹ️  Using 'zfs recv -F' to sync."
            else
-               zbud_msg "  ⚠️  Force is disabled; replication will fail if newer snapshots exist on destination."
+               zbud_msg "  ℹ️  Force is disabled, but no data divergence detected. Proceeding with replication."
            fi
        fi
        send_incremental "$remote_ds" || return 1
