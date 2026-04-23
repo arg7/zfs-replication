@@ -29,14 +29,13 @@ get_node_state() {
                         is_configured="true"
                     fi
 
-                    latest=$(zfs list -t snap -o name,creation -H -r "$ds" 2>/dev/null | grep "zeplicator_${label}-" | sort -k2 -r | head -n 1)
+                    latest=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "zeplicator_${label}-" | head -n 1)
                     if [[ -n "$latest" ]]; then
                         snap_name=$(echo "$latest" | awk "{print \$1}")
-                        snap_date=$(echo "$latest" | awk "{print \$2, \$3, \$4, \$5, \$6, \$7}")
+                        then=$(echo "$latest" | awk "{print \$2}")
                         # Calculate age in minutes
                         now=$(date +%s)
-                        then=$(date -d "$snap_date" +%s 2>/dev/null || echo 0)
-                        if [[ $then -gt 0 ]]; then
+                        if [[ -n "$then" ]]; then
                             age=$(( (now - then) / 60 ))
                             echo "DATASET|$ds|$label|$snap_name|$age|$is_configured|$heartbeat"
                         fi

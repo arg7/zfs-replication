@@ -4,9 +4,20 @@ IOMON := $(BUILD_DIR)/iomon
 LIBS := src/zfs-common.lib.sh src/zfs-status.lib.sh src/zfs-alerts.lib.sh src/zfs-retention.lib.sh src/zfs-transfer.lib.sh
 MAIN := src/zeplicator
 
-.PHONY: all clean
+PREFIX ?= /usr/local
+BINDIR := $(PREFIX)/bin
+
+.PHONY: all clean install
 
 all: $(IOMON) $(OUTPUT)
+
+install: all
+	@echo "Installing to $(DESTDIR)$(BINDIR)..."
+	mkdir -p $(DESTDIR)$(BINDIR)
+	cp $(OUTPUT) $(DESTDIR)$(BINDIR)/zep
+	cp $(IOMON) $(DESTDIR)$(BINDIR)/iomon
+	chmod +x $(DESTDIR)$(BINDIR)/zep $(DESTDIR)$(BINDIR)/iomon
+	@echo "Installation complete."
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
