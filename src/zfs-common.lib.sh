@@ -219,7 +219,7 @@ apply_repl_props() {
 }
 
 # Color detection
-if [[ -t 1 && -n "$TERM" && "$TERM" != "dumb" ]]; then
+if [[ -t 1 && -n "$TERM" && "$TERM" != "dumb" && "$ZEP_BW" != "true" ]]; then
     C_RED='\e[31m'
     C_GREEN='\e[32m'
     C_YELLOW='\e[33m'
@@ -248,7 +248,7 @@ zbud_msg() {
     # We use echo -e then sed to ensure escape codes are processed then stripped
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
 }
-zbud_warn() { zbud_msg "${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
+zbud_warn() { zbud_msg "${C_YELLOW}⚠️${C_RESET}  WARNING: $*"; }
 
 indent_output() {
     sed "s/^/${CHAIN_PREFIX}        /"
@@ -257,7 +257,7 @@ indent_output() {
 die() {
     local msg="$1"
     local exit_code=${2:-1}
-    zbud_msg "${C_RED}❌ ERROR:${C_RESET} $msg"
+    zbud_msg "${C_RED}❌${C_RESET} ERROR: $msg"
 
     if [[ -n "$local_ds" ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then

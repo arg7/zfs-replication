@@ -101,6 +101,7 @@ while [[ $# -gt 0 ]]; do
         --alias) CLI_ALIAS="$2"; shift 2 ;;
         --mark-only) MARK_ONLY=true; shift ;;
         --initial) initial_send=true; shift ;;
+        -bw) export ZEP_BW="true"; shift ;;
         --promote) PROMOTE=true; shift ;;
         --suspend) SUSPEND=true; shift ;;
         --resume) RESUME=true; shift ;;
@@ -168,7 +169,7 @@ if [[ "$CASCADED" != true ]]; then
     expected_ds=$(get_zfs_prop "zep:node:${my_hostname}:fs" "$raw_filesystem")
     if [[ -n "$expected_ds" && "$expected_ds" != "-" ]]; then
         if [[ ! "$local_ds" =~ ^"$expected_ds" ]]; then
-            echo -e "${C_YELLOW}⚠️${C_RESET}  Filesystem $local_ds is not managed by node $my_hostname (configured: $expected_ds)"
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️${C_RESET}  Filesystem $local_ds is not managed by node $my_hostname (configured: $expected_ds)"
             exit 1
         fi
     fi
@@ -576,10 +577,9 @@ if [[ -n "$REPL_CHAIN" ]]; then
     dry_flag=""
     [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
     echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
-    
     RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
     echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP (Role: $( [[ $ME_INDEX -eq 0 ]] && echo "master" || ( [[ $ME_INDEX -eq $((${#nodes[@]}-1)) ]] && echo "sink" || echo "middle" ) ))"
-fi
+    fi
 
 if [[ -n "$TARGET_NODE" ]]; then
     NODES_REMAINING=("$TARGET_NODE")
@@ -807,6 +807,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             casc_opts="--alias $hop_node"
             if [[ "$initial_send" == true ]]; then casc_opts+=" --initial"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
+            if [[ "$ZEP_BW" == "true" ]]; then casc_opts+=" -bw"; fi
             PROPS_ARG=$(get_repl_props_encoded "$local_ds")
             
             # Internal list of what arrived here (including virtual snaps)

@@ -177,7 +177,7 @@ cmd_status() {
                     IFS='|' read -r _ _ label _ age conf hb c <<< "$line"
 
                     age_str=$(format_minutes "$age")
-                    [[ "$conf" == "false" ]] && echo -e "      - ${C_DIM}$label${C_RESET}: [$c${age_str}${C_RESET}] ${C_RED}[unconfigured]${C_RESET}" || echo -e "      - $label: [$c${age_str}${C_RESET}]"
+                    [[ "$conf" == "false" ]] && echo -e "      - ${c}●${C_RESET} ${C_DIM}$label${C_RESET}: [${age_str}] ${C_RED}[unconfigured]${C_RESET}" || echo -e "      - ${c}●${C_RESET} $label: [${age_str}]"
                 done <<< "$ds_lines"
             done < <(echo "$filesystems" | grep -E "^FILESYSTEM\|${p_name}(\||/)" | cut -d'|' -f2 | sort -u)
         done

@@ -453,7 +453,7 @@ zfsbud_core() {
        fi
 
        if [[ $diff_status -eq 2 ]]; then
-           zbud_msg "${C_RED}🚨 FATAL:${C_RESET} Data divergence (Split-Brain) detected on $remote_ds!"
+           zbud_msg "${C_RED}🚨${C_RESET} FATAL: Data divergence (Split-Brain) detected on $remote_ds!"
            while IFS= read -r line; do zbud_msg "  $line"; done <<< "$diff_output"
            zbud_msg "${C_RED}🚨${C_RESET} Aborting replication to prevent silent data destruction!"
            
