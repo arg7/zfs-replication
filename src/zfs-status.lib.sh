@@ -178,7 +178,8 @@ cmd_status() {
                     [[ -z "$line" ]] && continue
                     IFS='|' read -r _ _ label _ age conf hb c <<< "$line"
 
-                    [[ "$conf" == "false" ]] && echo -e "      - ${DIM}$label${NC}: [$c${age}m$NC] ${R}[unconfigured]${NC}" || echo -e "      - $label: [$c${age}m$NC]"
+                    age_str=$(format_minutes "$age")
+                    [[ "$conf" == "false" ]] && echo -e "      - ${DIM}$label${NC}: [$c${age_str}$NC] ${R}[unconfigured]${NC}" || echo -e "      - $label: [$c${age_str}$NC]"
                 done <<< "$ds_lines"
             done < <(echo "$datasets" | grep -E "^DATASET\|${p_name}(\||/)" | cut -d'|' -f2 | sort -u)
         done

@@ -120,6 +120,19 @@ parse_time_to_seconds() {
     esac
 }
 
+format_minutes() {
+    local mins="$1"
+    [[ -z "$mins" || "$mins" == "-" ]] && { echo "-"; return; }
+    
+    if [[ $mins -lt 60 ]]; then
+        echo "${mins}m"
+    elif [[ $mins -lt 1440 ]]; then
+        echo "$((mins / 60))h $((mins % 60))m"
+    else
+        echo "$((mins / 1440))d $(( (mins % 1440) / 60 ))h $((mins % 60))m"
+    fi
+}
+
 resolve_node_pool() {
     local alias=$1
     local ds_raw=$2
