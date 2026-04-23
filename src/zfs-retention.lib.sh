@@ -41,7 +41,7 @@ resolve_retention() {
         k_count=1000
     fi
 
-    echo "${CHAIN_PREFIX}  🔄 Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
+    echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄${C_RESET} Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
     
     # Get snapshots matching label, sorted by creation date (newest first)
     mapfile -t snaps < <(zfs list -t snap -H -o name,zep:shipped -S creation -r "$ds" | grep "@.*$lbl")
@@ -76,7 +76,7 @@ resolve_retention() {
 
     local count=${#snaps[@]}
     if [[ $count -le $k_count ]]; then
-        echo "${CHAIN_PREFIX}  ✅ Snapshot count ($count) is within limit ($k_count). Skipping purge."
+        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Snapshot count ($count) is within limit ($k_count). Skipping purge."
         return
     fi
     
@@ -95,13 +95,13 @@ resolve_retention() {
 
         if [[ "$is_shipped" == true ]]; then
             if [[ "$DRY_RUN" == true ]]; then
-                echo "${CHAIN_PREFIX}  🗑️  [DRY RUN] Would purge old shipped snapshot: $snap_name"
+                echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  [DRY RUN] Would purge old shipped snapshot: $snap_name"
             else
-                echo "${CHAIN_PREFIX}  🗑️  Purging old shipped snapshot: $snap_name"
+                echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  Purging old shipped snapshot: $snap_name"
                 zfs destroy "$snap_name"
             fi
         else
-            echo "${CHAIN_PREFIX}  🛡️  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
+            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
         fi
     done
 }

@@ -168,7 +168,7 @@ if [[ "$CASCADED" != true ]]; then
     expected_ds=$(get_zfs_prop "zep:node:${my_hostname}:fs" "$raw_dataset")
     if [[ -n "$expected_ds" && "$expected_ds" != "-" ]]; then
         if [[ ! "$local_ds" =~ ^"$expected_ds" ]]; then
-            echo "⚠️  Dataset $local_ds is not managed by node $my_hostname (configured: $expected_ds)"
+            echo -e "${C_YELLOW}⚠️  Dataset $local_ds is not managed by node $my_hostname (configured: $expected_ds)${C_RESET}"
             exit 1
         fi
     fi
@@ -535,17 +535,17 @@ if [[ -n "$REPL_CHAIN" ]]; then
     
     # Pre-flight dependency check (only if --initial is set and NOT a cascaded call)
     if [[ "$initial_send" == true && "$CASCADED" == false ]]; then
-        echo "${CHAIN_PREFIX}  🛠️  Pre-flight: Checking dependencies (mbuffer, zstd) across all nodes..."
+        echo -e "${CHAIN_PREFIX}  ${C_CYAN}🛠️${C_RESET}  Pre-flight: Checking dependencies (mbuffer, zstd) across all nodes..."
         for n in "${nodes[@]}"; do
             n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
             n_user=$(resolve_node_user "$n" "$local_ds")
             
-            echo "${CHAIN_PREFIX}    🔍 Checking $n ($n_fqdn)..."
+            echo -e "${CHAIN_PREFIX}    ${C_CYAN}🔍 Checking $n ($n_fqdn)...${C_RESET}"
             if ! timeout "$((REPL_SSH_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "${n_user}@${n_fqdn}" "which mbuffer >/dev/null && which zstd >/dev/null"; then
                 die "Missing dependencies (mbuffer or zstd) or connection timeout on node: $n ($n_fqdn). Please install them before proceeding with --initial."
             fi
         done
-        echo "${CHAIN_PREFIX}  ✅ All nodes verified."
+        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ All nodes verified.${C_RESET}"
     fi
 
     NODES_REMAINING=()
@@ -575,10 +575,10 @@ if [[ -n "$REPL_CHAIN" ]]; then
     
     dry_flag=""
     [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-    echo "${CHAIN_PREFIX}🏁 Start${dry_flag}: $(date); Dataset: $local_ds; Label: $label"
+    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁 Start${C_RESET}${dry_flag}: $(date); Dataset: $local_ds; Label: $label"
     
     RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
-    echo "${CHAIN_PREFIX}  🛡️  Using dynamic retention for $label: $RESOLVED_KEEP (Role: $( [[ $ME_INDEX -eq 0 ]] && echo "master" || ( [[ $ME_INDEX -eq $((${#nodes[@]}-1)) ]] && echo "sink" || echo "middle" ) ))"
+    echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP (Role: $( [[ $ME_INDEX -eq 0 ]] && echo "master" || ( [[ $ME_INDEX -eq $((${#nodes[@]}-1)) ]] && echo "sink" || echo "middle" ) ))"
 fi
 
 if [[ -n "$TARGET_NODE" ]]; then
@@ -645,12 +645,12 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
     snap_name="${local_ds}@${snap_name_base}"
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "${CHAIN_PREFIX}  ⏳ [DRY RUN] Would create snapshot: $snap_name"
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
         VIRTUAL_SNAP_CREATED="$snap_name_base"
     elif zfs list -t snap "$snap_name" >/dev/null 2>&1; then
-        echo "${CHAIN_PREFIX}  ⏳ Snapshot $snap_name already exists. Reusing..."
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Snapshot $snap_name already exists. Reusing..."
     else
-        echo "${CHAIN_PREFIX}  ⏳ Creating snapshot: $snap_name"
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name"
         zfs snapshot "$snap_name" 2>&1 | indent_output
         [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
     fi
@@ -699,18 +699,18 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
     hop_user=$(resolve_node_user "$hop_node" "$raw_dataset")
     HOP_TARGET="${hop_user}@${hop_fqdn}"
     
-    echo "${CHAIN_PREFIX}  🔍 Checking connectivity to $hop_node ($hop_fqdn)..."
+    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🔍 Checking connectivity to $hop_node ($hop_fqdn)...${C_RESET}"
     NEXT_HOP_POOL=$(resolve_node_pool "$hop_node" "$raw_dataset")
     if [[ $? -eq 255 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
-            echo "${CHAIN_PREFIX}  ⚠️  WARNING: Node $hop_node is unreachable (Pre-flight). Skipping due to policy=resilience..."
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Node $hop_node is unreachable (Pre-flight). Skipping due to policy=resilience..."
             continue
         else
             die "Node $hop_node is unreachable (Pre-flight). Aborting due to policy=fail."
         fi
     fi
     
-    echo "${CHAIN_PREFIX}  🚀 Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
+    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🚀 Attempting replication:${C_RESET} $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
     zfsbud_opts=""
     if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
     if [[ "$DRY_RUN" == true ]]; then zfsbud_opts="${zfsbud_opts} -d"; fi
@@ -720,7 +720,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
     ZBUD_STATUS=$?
 
     if [[ $ZBUD_STATUS -eq 0 ]]; then
-        echo "${CHAIN_PREFIX}  ✅ Replication to $HOP_TARGET successful."
+        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Replication to $HOP_TARGET successful.${C_RESET}"
         TRANSFER_DONE=true
     elif [[ $ZBUD_STATUS -eq 2 ]]; then
         HAD_SPLIT_BRAIN=true
@@ -734,32 +734,32 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
                 [[ -n "$SPLIT_BRAIN_HINT" && "$CASCADED" == true ]] && echo "HINT_EXPORT:$SPLIT_BRAIN_HINT"
-                die "🚨 FATAL: Split-Brain detected on Sink node $hop_node. Aborting replication branch." 2
+                die "${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on Sink node $hop_node. Aborting replication branch." 2
             fi
-            echo "${CHAIN_PREFIX}  🚨 FATAL: Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
+            echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
             [[ -n "$SPLIT_BRAIN_HINT" && "$CASCADED" == true ]] && echo "HINT_EXPORT:$SPLIT_BRAIN_HINT"
             TRANSFER_DONE=false
             continue
         else
             [[ -n "$SPLIT_BRAIN_HINT" && "$CASCADED" == true ]] && echo "HINT_EXPORT:$SPLIT_BRAIN_HINT"
-            die "🚨 FATAL: Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
+            die "${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
         fi
     elif [[ $ZBUD_STATUS -eq 3 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
-                die "🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
+                die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
             fi
-            echo "${CHAIN_PREFIX}  🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
+            echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
             TRANSFER_DONE=false
             continue
         else
-            die "🚨 FATAL: Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
+            die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
     else
-        echo "${CHAIN_PREFIX}  ⚠️  WARNING: Local replication to $hop_node failed. Searching chain for a better donor..."
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Searching chain for a better donor..."
         
         if [[ "$IS_DONOR" == true ]]; then
-            echo "${CHAIN_PREFIX}  ❌ ERROR: Already acting as donor, skipping recursive discovery."
+            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
             DONOR_NODE=""
         else
             DONOR_NODE=$(find_best_donor "$hop_node" "$raw_dataset")
@@ -770,23 +770,23 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             donor_user=$(resolve_node_user "$DONOR_NODE" "$raw_dataset")
             donor_target="${donor_user}@${donor_fqdn}"
 
-            echo "${CHAIN_PREFIX}  ✅ SUCCESS: Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
+            echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ SUCCESS:${C_RESET} Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
             if ssh "$donor_target" "$ZEPLICATOR_CMD $raw_dataset $label $keep_fallback --alias $DONOR_NODE --target $hop_node --donor"; then
-                echo "${CHAIN_PREFIX}  ✅ Delegated replication from $DONOR_NODE to $hop_node successful."
+                echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Delegated replication from $DONOR_NODE to $hop_node successful.${C_RESET}"
                 
                 # RETRY local replication now that common ground should exist
-                echo "${CHAIN_PREFIX}  🔄 Retrying local replication to $hop_node..."
+                echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄 Retrying local replication to $hop_node...${C_RESET}"
                 if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
-                    echo "${CHAIN_PREFIX}  ✅ Local replication retry successful."
+                    echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Local replication retry successful.${C_RESET}"
                     TRANSFER_DONE=true
                 else
-                    echo "${CHAIN_PREFIX}  ❌ ERROR: Local replication retry failed after donor healing."
+                    echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Local replication retry failed after donor healing."
                 fi
             else
-                echo "${CHAIN_PREFIX}  ❌ ERROR: Delegated replication from $DONOR_NODE failed."
+                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Delegated replication from $DONOR_NODE failed."
             fi
         else
-            echo "${CHAIN_PREFIX}  ❌ ERROR: No suitable donor found for $hop_node."
+            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
         fi
     fi
 
@@ -803,7 +803,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         
         CASCADE_VERIFIED=false
         if [[ "$PROMOTE" == false && "$IS_DONOR" == false ]]; then
-            echo "${CHAIN_PREFIX}  🔗 Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
+            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🔗${C_RESET} Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
             casc_opts="--alias $hop_node"
             if [[ "$initial_send" == true ]]; then casc_opts+=" --initial"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
@@ -858,13 +858,13 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 ARRIVED_LIST=$(echo "$DOWNSTREAM_OUT" | grep "^SENT_LIST:" | cut -d':' -f2)
                 
                 if [[ -n "$LATEST_SNAP" && ",$ARRIVED_LIST," == *",$LATEST_SNAP,"* ]]; then
-                    echo "${CHAIN_PREFIX}  ✅ VERIFICATION SUCCESS: Snapshot $LATEST_SNAP confirmed reaching a sink node."
+                    echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ VERIFICATION SUCCESS:${C_RESET} Snapshot $LATEST_SNAP confirmed reaching a sink node."
                     CASCADE_VERIFIED=true
                 else
-                    echo "${CHAIN_PREFIX}  ⚠️  WARNING: Verification FAILED. Snapshot $LATEST_SNAP not confirmed at end of chain, but transfer to $hop_node succeeded."
+                    echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Verification FAILED. Snapshot $LATEST_SNAP not confirmed at end of chain, but transfer to $hop_node succeeded."
                 fi
             else
-                echo "${CHAIN_PREFIX}  ⚠️  WARNING: Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
+                echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
             fi
         else
             # If donor run or dry run, we consider the local transfer as enough for "success" of this hop
@@ -950,5 +950,5 @@ fi
 
 dry_done=""
 [[ "$DRY_RUN" == true ]] && dry_done=" [DRY RUN]"
-echo "${CHAIN_PREFIX}  ✅ Done${dry_done}: $(date)"
+echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Done${C_RESET}${dry_done}: $(date)"
 exit 0

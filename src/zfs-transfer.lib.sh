@@ -180,7 +180,7 @@ zfsbud_core() {
 
         if [[ "$source_guid" == "$dest_guid" ]]; then
            last_snapshot_common="${source_snap#*@}"
-           zbud_msg "  🔍 Found common snapshot by GUID: $last_snapshot_common (GUID: $source_guid)"
+           zbud_msg "  ${C_CYAN}🔍 Found common snapshot by GUID:${C_RESET} $last_snapshot_common (GUID: $source_guid)"
            return 0
         fi
       done
@@ -250,7 +250,7 @@ zfsbud_core() {
     local latest_snapshot_source=$(echo "$last_snapshot_source" | awk '{print $1}')
     local remote_ds="$1"
     if [[ ${latest_snapshot_source#*@} == "$last_snapshot_common" ]]; then
-      zbud_msg "  ⏩ Skipping incremental: already up to date."
+      zbud_msg "  ${C_DIM}⏩ Skipping incremental:${C_RESET} already up to date."
       return 0
     fi
 
@@ -259,7 +259,7 @@ zfsbud_core() {
         return 0
     fi
 
-    zbud_msg "  🚀 Sending incremental: $last_snapshot_common -> ${latest_snapshot_source#*@} to $remote_ds"
+    zbud_msg "  ${C_CYAN}🚀 Sending incremental:${C_RESET} $last_snapshot_common -> ${latest_snapshot_source#*@} to $remote_ds"
     
     # Identify LOCAL dataset to send from
     local local_ds="$dataset"
@@ -331,7 +331,7 @@ zfsbud_core() {
         remote_ds="${destination_parent_dataset}/${ds_name}"
     fi
     
-    zbud_msg "  📦 Processing $local_ds -> ${destination_parent_dataset} (Target: ${remote_ds})"
+    zbud_msg "  ${C_BLUE}📦 Processing${C_RESET} $local_ds -> ${destination_parent_dataset} (Target: ${remote_ds})"
     
     REPL_FORCE=$(get_zfs_prop "zep:zfs:force" "$dataset")
 
@@ -453,9 +453,9 @@ zfsbud_core() {
        fi
 
        if [[ $diff_status -eq 2 ]]; then
-           zbud_msg "🚨 FATAL: Data divergence (Split-Brain) detected on $remote_ds!"
+           zbud_msg "${C_RED}🚨 FATAL:${C_RESET} Data divergence (Split-Brain) detected on $remote_ds!"
            while IFS= read -r line; do zbud_msg "  $line"; done <<< "$diff_output"
-           zbud_msg "🚨 Aborting replication to prevent silent data destruction!"
+           zbud_msg "${C_RED}🚨 Aborting replication to prevent silent data destruction!${C_RESET}"
            
            # Generate specific rollback hint
            local hint_msg="HINT: Data divergence (Split-Brain) detected on ${hop_node:-destination} ${remote_ds} dataset.|HINT_NL|"
@@ -495,9 +495,9 @@ zfsbud_core() {
        
        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
-           zbud_msg "  ℹ️  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
+           zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
            if [[ "$REPL_FORCE" != "false" ]]; then
-               zbud_msg "  ℹ️  Using 'zfs recv -F' to sync."
+               zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Using 'zfs recv -F' to sync."
            fi
        fi
        send_incremental "$remote_ds" || return 1

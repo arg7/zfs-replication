@@ -101,7 +101,7 @@ log_message() {
     local msg="$1"
     local alias=$(hostname)
     local log_file="/var/log/zeplicator-${alias}.log"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" >> "$log_file" 2>/dev/null || true
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
 }
 
 parse_time_to_seconds() {
@@ -199,7 +199,7 @@ apply_repl_props() {
     local encoded=$2
     [[ -z "$encoded" ]] && return
     
-    echo "${CHAIN_PREFIX}  ⚙️  Syncing replication properties for $ds..."
+    echo -e "${CHAIN_PREFIX}  ${C_DIM}⚙️${C_RESET}  Syncing replication properties for $ds..."
     local decoded=$(echo -n "$encoded" | base64 -d)
     IFS=';' read -ra props <<< "$decoded"
     for p in "${props[@]}"; do
@@ -208,25 +208,47 @@ apply_repl_props() {
             local new_val="${p#*=}"
             if [[ "$current_val" != "$new_val" ]]; then
                 if [[ "$DRY_RUN" == true ]]; then
-                    echo "${CHAIN_PREFIX}    [DRY RUN] Would update ${p%%=*} -> $new_val"
+                    echo -e "${CHAIN_PREFIX}    [DRY RUN] Would update ${p%%=*} -> $new_val"
                 else
-                    echo "${CHAIN_PREFIX}    Updating ${p%%=*} -> $new_val"
-                    zfs set "$p" "$ds" || echo "${CHAIN_PREFIX}    Warning: Failed to set $p"
+                    echo -e "${CHAIN_PREFIX}    Updating ${p%%=*} -> $new_val"
+                    zfs set "$p" "$ds" || echo -e "${CHAIN_PREFIX}    Warning: Failed to set $p"
                 fi
             fi
         fi
     done
 }
 
+# Color detection
+if [[ -t 1 && -n "$TERM" && "$TERM" != "dumb" ]]; then
+    C_RED='\e[31m'
+    C_GREEN='\e[32m'
+    C_YELLOW='\e[33m'
+    C_BLUE='\e[34m'
+    C_CYAN='\e[36m'
+    C_BOLD='\e[1m'
+    C_DIM='\e[2m'
+    C_RESET='\e[0m'
+else
+    C_RED=''
+    C_GREEN=''
+    C_YELLOW=''
+    C_BLUE=''
+    C_CYAN=''
+    C_BOLD=''
+    C_DIM=''
+    C_RESET=''
+fi
+
 zbud_msg() { 
     local msg="${CHAIN_PREFIX}    $*"
-    echo "$msg" 1>&2
+    echo -e "$msg" 1>&2
     local alias=$(hostname)
     local log_file="/var/log/zeplicator-${alias}.log"
     # Strip ANSI colors/formatting for the log file
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
+    # We use echo -e then sed to ensure escape codes are processed then stripped
+    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
 }
-zbud_warn() { zbud_msg "⚠️  WARNING: $*"; }
+zbud_warn() { zbud_msg "${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
 
 indent_output() {
     sed "s/^/${CHAIN_PREFIX}        /"
@@ -235,9 +257,9 @@ indent_output() {
 die() {
     local msg="$1"
     local exit_code=${2:-1}
-    zbud_msg "❌ ERROR: $msg"
+    zbud_msg "${C_RED}❌ ERROR:${C_RESET} $msg"
 
-    if [[ -n "$local_ds" && "$CASCADED" != true && "$exit_code" -ne 2 ]]; then
+    if [[ -n "$local_ds" ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then
             send_smtp_alert "critical" "ERROR: $msg"
         fi
@@ -245,10 +267,10 @@ die() {
     if [[ "$CASCADED" != true ]]; then
         echo ""
         if [[ -f "/tmp/zfs-replication.hint" ]]; then
-            cat /tmp/zfs-replication.hint | sed 's/|HINT_NL|/\n/g'
+            echo -e "$(cat /tmp/zfs-replication.hint | sed 's/|HINT_NL|/\\n/g')"
             rm -f "/tmp/zfs-replication.hint"
         elif [[ "$exit_code" -eq 1 ]]; then
-            echo "HINT: If replication failed because there is no common ground:"
+            echo -e "${C_BOLD}HINT: If replication failed because there is no common ground:${C_RESET}"
             echo "  - For a new destination: try adding the '--initial' flag."
             echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
             echo "  - To force a fresh start (DANGER): use '--promote --destroy-chain' on the Master."
@@ -312,7 +334,7 @@ check_stuck_job() {
             fi
             die "ERR: Stuck job detected ($age seconds old) at $LOCKFILE. Alert sent."
         else
-            zbud_msg "ℹ️  Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid. Skipping run."
+            zbud_msg "${C_DIM}ℹ️${C_RESET}  Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid. Skipping run."
             exit 0
         fi
     done

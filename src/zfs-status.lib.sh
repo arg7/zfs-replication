@@ -74,8 +74,6 @@ cmd_status() {
     [[ -z "$REPL_CHAIN" ]] && die "ERR: No replication chain found."
     IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
     
-    G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; DIM='\033[2;37m'; NC='\033[0m'
-    
     local global_exit_code=0
 
     for n in "${nodes[@]}"; do
@@ -111,75 +109,75 @@ cmd_status() {
                 else hb=60; fi
             fi
             
-            c=$G; [[ $age -ge $((hb*5)) ]] && c=$Y; [[ $age -ge $((hb*10)) ]] && c=$R
+            c=$C_GREEN; [[ $age -ge $((hb*5)) ]] && c=$C_YELLOW; [[ $age -ge $((hb*10)) ]] && c=$C_RED
             datasets+="${line}|${c}"$'\n'
         done <<< "$datasets_raw"
 
         relevant_pools=$(echo "$datasets" | cut -d'|' -f2 | cut -d'/' -f1 | sort -u)
         
         # Pre-evaluate Zpool statuses
-        pool_max_status=$G
+        pool_max_status=$C_GREEN
         for p_name in $relevant_pools; do
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
             health=$(echo "$p_line" | awk '{print $2}')
             cap=$(echo "$p_line" | awk '{print $3}' | tr -d '%')
             
-            [[ "$health" != "ONLINE" ]] && pool_max_status=$R
-            [[ "$pool_max_status" != "$R" && "$cap" -ge 40 ]] && pool_max_status=$Y
-            [[ "$cap" -ge 80 ]] && pool_max_status=$R
+            [[ "$health" != "ONLINE" ]] && pool_max_status=$C_RED
+            [[ "$pool_max_status" != "$C_RED" && "$cap" -ge 40 ]] && pool_max_status=$C_YELLOW
+            [[ "$cap" -ge 80 ]] && pool_max_status=$C_RED
         done
 
         # Aggregate Node status
-        n_status=$G
-        [[ $node_reachable -ne 0 ]] && n_status=$R
-        [[ "$n_status" != "$R" && "$datasets" =~ "$R" ]] && n_status=$R
-        [[ "$n_status" != "$R" && "$datasets" =~ "$Y" ]] && n_status=$Y
-        [[ "$n_status" != "$R" && "$pool_max_status" == "$R" ]] && n_status=$R
-        [[ "$n_status" != "$R" && "$pool_max_status" == "$Y" ]] && n_status=$Y
+        n_status=$C_GREEN
+        [[ $node_reachable -ne 0 ]] && n_status=$C_RED
+        [[ "$n_status" != "$C_RED" && "$datasets" =~ "$C_RED" ]] && n_status=$C_RED
+        [[ "$n_status" != "$C_RED" && "$datasets" =~ "$C_YELLOW" ]] && n_status=$C_YELLOW
+        [[ "$n_status" != "$C_RED" && "$pool_max_status" == "$C_RED" ]] && n_status=$C_RED
+        [[ "$n_status" != "$C_RED" && "$pool_max_status" == "$C_YELLOW" ]] && n_status=$C_YELLOW
         
         # Update global exit code
-        if [[ "$n_status" == "$R" ]]; then
+        if [[ "$n_status" == "$C_RED" ]]; then
             global_exit_code=2
-        elif [[ "$n_status" == "$Y" && $global_exit_code -lt 1 ]]; then
+        elif [[ "$n_status" == "$C_YELLOW" && $global_exit_code -lt 1 ]]; then
             global_exit_code=1
         fi
         
-        echo -e "${n_status}●${NC} $n"
-        [[ $node_reachable -ne 0 ]] && { echo -e "  ${R}  [UNREACHABLE]${NC}"; continue; }
+        echo -e "${n_status}●${C_RESET} $n"
+        [[ $node_reachable -ne 0 ]] && { echo -e "  ${C_RED}  [UNREACHABLE]${C_RESET}"; continue; }
         
         for p_name in $relevant_pools; do
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
             health=$(echo "$p_line" | awk '{print $2}')
             cap=$(echo "$p_line" | awk '{print $3}' | tr -d '%')
             
-            p_status=$G
-            [[ "$health" != "ONLINE" ]] && p_status=$R
-            [[ "$cap" -ge 40 ]] && p_status=$Y
-            [[ "$cap" -ge 80 ]] && p_status=$R
+            p_status=$C_GREEN
+            [[ "$health" != "ONLINE" ]] && p_status=$C_RED
+            [[ "$cap" -ge 40 ]] && p_status=$C_YELLOW
+            [[ "$cap" -ge 80 ]] && p_status=$C_RED
             
             # Aggregate from child datasets
             ds_statuses=$(echo "$datasets" | grep "^DATASET|$p_name")
-            [[ "$p_status" != "$R" && "$ds_statuses" =~ "$R" ]] && p_status=$R
-            [[ "$p_status" != "$R" && "$ds_statuses" =~ "$Y" ]] && p_status=$Y
+            [[ "$p_status" != "$C_RED" && "$ds_statuses" =~ "$C_RED" ]] && p_status=$C_RED
+            [[ "$p_status" != "$C_RED" && "$ds_statuses" =~ "$C_YELLOW" ]] && p_status=$C_YELLOW
 
-            echo -e "  ${p_status}💾${NC} $p_name ($health, $cap%)"
+            echo -e "  ${p_status}💾${C_RESET} $p_name ($health, $cap%)"
 
             # Use process substitution or a read loop from a string to preserve state if needed,
             # but since we already evaluated colors, we just read them.
             while read -r ds; do
                 [[ -z "$ds" ]] && continue
                 ds_lines=$(echo "$datasets" | grep "^DATASET|$ds|")
-                ds_status=$G
-                [[ "$ds_lines" =~ "$R" ]] && ds_status=$R
-                [[ "$ds_status" != "$R" && "$ds_lines" =~ "$Y" ]] && ds_status=$Y
+                ds_status=$C_GREEN
+                [[ "$ds_lines" =~ "$C_RED" ]] && ds_status=$C_RED
+                [[ "$ds_status" != "$C_RED" && "$ds_lines" =~ "$C_YELLOW" ]] && ds_status=$C_YELLOW
 
-                echo -e "    ${ds_status}📁${NC} $(basename "$ds")"
+                echo -e "    ${ds_status}📁${C_RESET} $(basename "$ds")"
                 while read -r line; do
                     [[ -z "$line" ]] && continue
                     IFS='|' read -r _ _ label _ age conf hb c <<< "$line"
 
                     age_str=$(format_minutes "$age")
-                    [[ "$conf" == "false" ]] && echo -e "      - ${DIM}$label${NC}: [$c${age_str}$NC] ${R}[unconfigured]${NC}" || echo -e "      - $label: [$c${age_str}$NC]"
+                    [[ "$conf" == "false" ]] && echo -e "      - ${C_DIM}$label${C_RESET}: [$c${age_str}${C_RESET}] ${C_RED}[unconfigured]${C_RESET}" || echo -e "      - $label: [$c${age_str}${C_RESET}]"
                 done <<< "$ds_lines"
             done < <(echo "$datasets" | grep -E "^DATASET\|${p_name}(\||/)" | cut -d'|' -f2 | sort -u)
         done
