@@ -746,7 +746,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             continue
         else
             [[ -n "$SPLIT_BRAIN_HINT" && "$CASCADED" == true ]] && echo "HINT_EXPORT:$SPLIT_BRAIN_HINT"
-            die "${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
+            die "Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
         fi
     elif [[ $ZBUD_STATUS -eq 3 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
