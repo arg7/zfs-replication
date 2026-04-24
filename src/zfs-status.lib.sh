@@ -165,8 +165,13 @@ cmd_status() {
         if [[ $node_reachable -eq 0 ]]; then
             n_parts=()
             
+            fs_parts=()
+            [[ "$pool_has_sb" == "true" ]] && fs_parts+=("${C_RED}split-brain${C_RESET}")
+            if [[ ${#fs_parts[@]} -gt 0 ]]; then
+                n_parts+=("fs: [$(IFS=", "; echo "${fs_parts[*]}")]")
+            fi
+
             snap_parts=()
-            [[ "$pool_has_sb" == "true" ]] && snap_parts+=("${C_RED}split-brain${C_RESET}")
             if [[ "$filesystems" =~ \|RED$'\n' ]]; then snap_parts+=("${C_RED}stale${C_RESET}")
             elif [[ "$filesystems" =~ \|YELLOW$'\n' ]]; then snap_parts+=("${C_YELLOW}late${C_RESET}")
             fi
