@@ -243,7 +243,7 @@ zfsbud_core() {
         ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
 
-      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null || echo 0)
+      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
       local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
       log_message "REPLICATION: Successfully sent initial replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
 
@@ -335,7 +335,7 @@ zfsbud_core() {
         }
       fi
 
-      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null || echo 0)
+      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
       local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
       log_message "REPLICATION: Successfully sent incremental replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
 
