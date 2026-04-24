@@ -140,7 +140,7 @@ cmd_status() {
             if [[ "$cap" -ge 40 ]]; then pool_has_full="true"; fi
             
             # Bubble split-brain to pool
-            if echo "$filesystems" | grep -q "^FILESYSTEM|$p_name|.*|true|RED$"; then
+            if echo "$filesystems" | grep -E "^FILESYSTEM|$p_name(\||/)" | grep -q "|true|RED$"; then
                 pool_max_status="RED"
                 pool_has_sb="true"
             fi
@@ -165,25 +165,30 @@ cmd_status() {
         if [[ $node_reachable -eq 0 ]]; then
             n_parts=()
             
-            # Add split-brain tag to node
-            if [[ "$pool_has_sb" == "true" ]]; then n_parts+=("${C_RED}${C_BLINK}[split-brain]${C_RESET}"); fi
-
-            snap_desc=""
-            if [[ "$filesystems" =~ \|RED$'\n' ]]; then snap_desc="stale"
-            elif [[ "$filesystems" =~ \|YELLOW$'\n' ]]; then snap_desc="late"
+            snap_parts=()
+            [[ "$pool_has_sb" == "true" ]] && snap_parts+=("${C_RED}split-brain${C_RESET}")
+            if [[ "$filesystems" =~ \|RED$'\n' ]]; then snap_parts+=("${C_RED}stale${C_RESET}")
+            elif [[ "$filesystems" =~ \|YELLOW$'\n' ]]; then snap_parts+=("${C_YELLOW}late${C_RESET}")
             fi
             
-            if [[ -n "$snap_desc" ]]; then n_parts+=("snap: [$snap_desc]"); fi
-            
-            zpool_desc=""
-            if [[ "$pool_has_check" == "true" ]]; then zpool_desc="check"
-            elif [[ "$pool_has_full" == "true" ]]; then zpool_desc="full"
+            if [[ ${#snap_parts[@]} -gt 0 ]]; then
+                n_parts+=("snap: [$(IFS=", "; echo "${snap_parts[*]}")]")
             fi
             
-            if [[ -n "$zpool_desc" ]]; then n_parts+=("zpool: [$zpool_desc]"); fi
+            zpool_parts=()
+            [[ "$pool_has_check" == "true" ]] && zpool_parts+=("${C_RED}check${C_RESET}")
+            if [[ "$pool_has_full" == "true" ]]; then
+                if [[ "$pool_max_status" == "RED" ]]; then zpool_parts+=("${C_RED}full${C_RESET}")
+                else zpool_parts+=("${C_YELLOW}full${C_RESET}")
+                fi
+            fi
+            
+            if [[ ${#zpool_parts[@]} -gt 0 ]]; then
+                n_parts+=("zpool: [$(IFS=", "; echo "${zpool_parts[*]}")]")
+            fi
             
             if [[ ${#n_parts[@]} -gt 0 ]]; then
-                n_desc="  $(IFS=", "; echo "${n_parts[*]}")"
+                n_desc="  $(IFS=" | "; echo "${n_parts[*]}")"
             fi
         fi
 
