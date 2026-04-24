@@ -187,25 +187,17 @@ zfsbud_core() {
     [ -n "$last_snapshot_common" ] && return 0 || return 1
   }
 
-  send_initial() {
-    local latest_line=${source_snapshots[-1]}
-    local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
+  send_snapshot() {
     local remote_ds="$1"
-
-    if [[ "$dry_run" == true ]]; then
-        zbud_msg "  🚀 [DRY RUN] Would send initial snapshot to $remote_ds: $latest_snapshot_source"
-        last_snapshot_common="${latest_snapshot_source#*@}"
-        return 0
-    fi
-
-    zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
-    zbud_msg "Sending initial snapshot to destination $remote_ds..."
-    
-    # Identify LOCAL filesystem to send from
+    local is_initial="$2"
     local local_ds="$filesystem"
-
     local timeout_val=$(resolve_proc_timeout "$filesystem")
     local ssh_t=$(resolve_ssh_timeout "$filesystem")
+
+    # Extract snapshot info
+    local latest_line=${source_snapshots[-1]}
+    local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
+    local snap_name="${latest_snapshot_source#*@}"
 
     # Configure flags based on properties
     local use_raw="false"
@@ -214,14 +206,43 @@ zfsbud_core() {
     local use_resume="false"
     [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
 
-    local send_args="-R -v"
-    local recv_args="-u"
+    # Build send/recv args based on transfer type
+    local send_args recv_args label_msg
+    if [[ "$is_initial" == "true" ]]; then
+      send_args="-R -v"
+      recv_args="-u"
+      label_msg="initial"
+    else
+      # Check if already up to date
+      if [[ "$snap_name" == "$last_snapshot_common" ]]; then
+        zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
+        return 0
+      fi
+      send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\" -v"
+      recv_args="-u"
+      label_msg="incremental: $last_snapshot_common -> $snap_name"
+    fi
 
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
     [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
 
-    if [ -z "$dry_run" ]; then
+    # Dry run handling
+    if [[ "$dry_run" == true ]]; then
+      if [[ "$is_initial" == "true" ]]; then
+        zbud_msg "  🚀 [DRY RUN] Would send initial snapshot to $remote_ds: $latest_snapshot_source"
+        last_snapshot_common="$snap_name"
+      else
+        zbud_msg "  ${C_CYAN}🚀 [DRY RUN]${C_RESET} Would send incremental: $last_snapshot_common -> $snap_name to $remote_ds"
+      fi
+      return 0
+    fi
+
+    # Pre-send operations
+    if [[ "$is_initial" == "true" ]]; then
+      zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
+      zbud_msg "Sending initial snapshot to destination $remote_ds..."
+
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
       if [[ "$DESTROY_CHAIN" == true ]]; then
         zbud_msg "DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
@@ -231,125 +252,70 @@ zfsbud_core() {
           zfs destroy -r "$remote_ds" 2>/dev/null || true
         fi
       fi
+    else
+      zbud_msg "  ${C_CYAN}🚀${C_RESET} Sending incremental: $last_snapshot_common -> $snap_name to $remote_ds"
+    fi
 
-      local prefix=$(get_snap_prefix "$filesystem")
-      local alias_val=${CLI_ALIAS:-$(hostname)}
-      local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
-      local err_log="/tmp/${prefix}${alias_val}-replication.err"
-      > "${lock_path}.cnt" # Reset counter
-      > "$err_log" # Clear log
+    # Setup logging
+    local prefix=$(get_snap_prefix "$filesystem")
+    local alias_val=${CLI_ALIAS:-$(hostname)}
+    local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
+    local err_log="/tmp/${prefix}${alias_val}-replication.err"
+    > "${lock_path}.cnt"
+    > "$err_log"
 
-      if [ -n "$remote_shell" ]; then
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>$err_log | zstd 2>>$err_log | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>$err_log" && return 1
+    # Update lock file with destination info for progress monitoring (incremental only)
+    if [[ "$is_initial" != "true" && -n "$remote_shell" && -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
+      echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
+    fi
+
+    # Execute transfer pipeline
+    local status=0
+    if [ -n "$remote_shell" ]; then
+      if [[ "$is_initial" == "true" ]]; then
+        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>$err_log | zstd 2>>$err_log | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>$err_log" && status=1
       else
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>$err_log" && return 1
-      fi
-
-      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
-      local snap_count=$(grep -c "send from" "$err_log" || echo 0)
-      log_message "REPLICATION: Successfully sent initial replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
-
-      local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
-      if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
-        zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send (Initial)..."
-        sleep "$delay"
-      fi
-    fi
-    last_snapshot_common="${latest_snapshot_source#*@}"
-  }
-
-  send_incremental() {
-    local last_snapshot_source=${source_snapshots[-1]}
-    local latest_snapshot_source=$(echo "$last_snapshot_source" | awk '{print $1}')
-    local remote_ds="$1"
-    if [[ ${latest_snapshot_source#*@} == "$last_snapshot_common" ]]; then
-      zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
-      return 0
-    fi
-
-    if [[ "$dry_run" == true ]]; then
-        zbud_msg "  ${C_CYAN}🚀 [DRY RUN]${C_RESET} Would send incremental: $last_snapshot_common -> ${latest_snapshot_source#*@} to $remote_ds"
-        return 0
-    fi
-
-    zbud_msg "  ${C_CYAN}🚀${C_RESET} Sending incremental: $last_snapshot_common -> ${latest_snapshot_source#*@} to $remote_ds"
-    
-    # Identify LOCAL filesystem to send from
-    local local_ds="$filesystem"
-
-    local timeout_val=$(resolve_proc_timeout "$filesystem")
-    local ssh_t=$(resolve_ssh_timeout "$filesystem")
-
-    # Configure flags based on properties
-    local use_raw="false"
-    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
-
-    local use_resume="false"
-    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
-
-    local send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\" -v"
-    local recv_args="-u"
-
-    [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
-    [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
-
-    if [ -z "$dry_run" ]; then
-      local prefix=$(get_snap_prefix "$filesystem")
-      local alias_val=${CLI_ALIAS:-$(hostname)}
-      local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
-      local err_log="/tmp/${prefix}${alias_val}-replication.err"
-      > "${lock_path}.cnt" # Reset counter
-
-      if [ -n "$remote_shell" ]; then
-        # Update lock file with destination info for progress monitoring
-        if [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
-            echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
-        fi
-
         set -o pipefail
-        # Clear error log
-        > "$err_log"
-        # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
         timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>$err_log | zstd 2>>$err_log | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>$err_log"
-        local status=$?
+        status=$?
         set +o pipefail
-        if [[ $status -ne 0 ]]; then
-           if [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
-               zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
-               return 0
-           fi
-           zbud_msg "Pipeline failed with status $status"
-           if [[ -f $err_log ]]; then
-               while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
-           fi
-           return 1
-        fi
-      else
-        > "$err_log"
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>$err_log" && {
-           if [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
-               zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
-               return 0
-           fi
-           zbud_msg "Pipeline failed"
-           if [[ -f $err_log ]]; then
-               while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
-           fi
-           return 1
-        }
       fi
+    else
+      ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>$err_log" && status=1
+    fi
 
-      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
-      local snap_count=$(grep -c "send from" "$err_log" || echo 0)
-      log_message "REPLICATION: Successfully sent incremental replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
-
-      local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
-      if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
-        zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send (Incremental)..."
-        sleep "$delay"
+    # Error handling for incremental transfers
+    if [[ "$is_initial" != "true" && $status -ne 0 ]]; then
+      if [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
+        zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
+        status=0
+      else
+        zbud_msg "Pipeline failed with status $status"
+        if [[ -f $err_log ]]; then
+          while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
+        fi
+        return 1
       fi
     fi
+
+    # Success logging
+    local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
+    local snap_count=$(grep -c "send from" "$err_log" || echo 0)
+    log_message "REPLICATION: Successfully sent $label_msg replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
+
+    # Debug delay
+    local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
+    if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
+      zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send ($label_msg)..."
+      sleep "$delay"
+    fi
+
+    # Update common snapshot tracking
+    if [[ "$is_initial" == "true" ]]; then
+      last_snapshot_common="$snap_name"
+    fi
+
+    return $status
   }
 
   # Simplified processing for zeplicator context
@@ -406,7 +372,7 @@ zfsbud_core() {
 
     if ! set_common_snapshot; then
        if [ -n "$initial" ]; then
-          send_initial "$remote_ds" || return 1
+          send_snapshot "$remote_ds" "true" || return 1
        else
           zbud_warn "No common snapshots for $local_ds."
           send_smtp_alert "warning" "WARNING: No common snapshots for $local_ds to $remote_ds."
@@ -539,7 +505,7 @@ zfsbud_core() {
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
        fi
-       send_incremental "$remote_ds" || return 1
+       send_snapshot "$remote_ds" "false" || return 1
     fi
   done
   return 0
