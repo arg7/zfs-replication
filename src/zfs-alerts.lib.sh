@@ -88,7 +88,7 @@ Date: $(date -R)
 $msg
 $rate_limit_notice
 
---- Error Details ---
+--- Details ---
 ${detail:-No specific error details captured.}
 EOF
 
