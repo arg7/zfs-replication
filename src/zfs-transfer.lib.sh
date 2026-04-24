@@ -245,7 +245,7 @@ zfsbud_core() {
 
       local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
       local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
-      log_message "REPLICATION: Successfully sent initial replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
+      log_message "REPLICATION: Successfully sent initial replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
 
       local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
       if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
@@ -337,7 +337,7 @@ zfsbud_core() {
 
       local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
       local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
-      log_message "REPLICATION: Successfully sent incremental replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
+      log_message "REPLICATION: Successfully sent incremental replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
 
       local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
       if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then

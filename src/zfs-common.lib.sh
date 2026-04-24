@@ -133,6 +133,9 @@ log_message() {
     local log_file="/var/log/zeplicator-${alias}.log"
     # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes
     local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
+    if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
+        clean_msg="INFO: $clean_msg"
+    fi
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $clean_msg" >> "$log_file" 2>/dev/null || true
 }
 
@@ -289,6 +292,9 @@ zbud_msg() {
     local log_file="/var/log/zeplicator-${alias}.log"
     # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes from the message
     local clean_msg=$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
+    if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
+        clean_msg="INFO: $clean_msg"
+    fi
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $clean_msg" >> "$log_file" 2>/dev/null || true
 }
 zbud_warn() { zbud_msg "  ${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
