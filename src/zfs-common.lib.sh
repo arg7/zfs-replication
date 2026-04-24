@@ -236,7 +236,7 @@ apply_repl_props() {
                     echo -e "${CHAIN_PREFIX}    [DRY RUN] Would update $prop_key -> $new_val"
                 else
                     echo -e "${CHAIN_PREFIX}    Updating $prop_key -> $new_val"
-                    zfs set "$p" "$ds" || echo -e "${CHAIN_PREFIX}    Warning: Failed to set $p"
+                    zfs set "$p" "$ds" || echo -e "${CHAIN_PREFIX}    ${C_YELLOW}⚠️  WARNING:${C_RESET} Failed to set $p"
                 fi
             fi
         fi
@@ -278,7 +278,7 @@ zbud_msg() {
     # We use echo -e then sed to ensure escape codes are processed then stripped
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$log_file" 2>/dev/null || true
 }
-zbud_warn() { zbud_msg "${C_YELLOW}⚠️${C_RESET}  WARNING: $*"; }
+zbud_warn() { zbud_msg "${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
 
 indent_output() {
     sed "s/^/${CHAIN_PREFIX}        /"
@@ -287,7 +287,7 @@ indent_output() {
 die() {
     local msg="$1"
     local exit_code=${2:-1}
-    zbud_msg "${C_RED}❌${C_RESET} ERROR: $msg"
+    zbud_msg "${C_RED}❌ ERROR:${C_RESET} $msg"
 
     if [[ -n "$local_ds" ]]; then
         if type send_smtp_alert >/dev/null 2>&1; then

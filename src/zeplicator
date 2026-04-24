@@ -381,7 +381,7 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
         n_user=$(resolve_node_user "$n" "$local_ds")
         n_ds=$(resolve_node_filesystem "$n" "$local_ds")
         echo "    ⏳ Setting zep:suspend=$VAL on $n ($n_fqdn)..."
-        ssh "${n_user}@${n_fqdn}" "zfs set zep:suspend=$VAL ${n_ds}" || echo "  Warning: Failed to set property on $n"
+        ssh "${n_user}@${n_fqdn}" "zfs set zep:suspend=$VAL ${n_ds}" || echo -e "  ${C_YELLOW}⚠️  WARNING:${C_RESET} Failed to set property on $n"
     done
     
     send_smtp_alert "info" "NOTICE: ZFS Replication has been ${ACTION} for filesystem $raw_filesystem on $my_hostname. Master node: ${nodes[0]}. New state: zep:suspend=$VAL"
@@ -910,7 +910,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 HAD_SPLIT_BRAIN=true
                 echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"
                 if [[ "$REPL_POLICY" == "resilience" ]]; then
-                    echo "${CHAIN_PREFIX}  ⚠️  WARNING: Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
+                    echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
                     # SKIP all nodes that were supposed to be handled by this hop
                     # In a linear chain, these are all remaining nodes in the REPL_CHAIN after hop_node
                     # But we only skip nodes that are already in OUR NODES_REMAINING list.
@@ -948,11 +948,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         elif [[ "$REPL_POLICY" == "fail" ]]; then
             die "Downstream verification/cascade failed for $hop_node. Aborting due to policy=fail."
         else
-            echo "${CHAIN_PREFIX}  ⚠️  Continuing to next hop in chain due to policy=resilience..."
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Continuing to next hop in chain due to policy=resilience..."
             REPLICATION_SUCCESS=true # We still count the local transfer as a partial success for shipped marking
         fi
     else
-        echo "${CHAIN_PREFIX}  ❌ ERROR: Replication to $hop_node failed. Skipping to next available node in chain..."
+        echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Replication to $hop_node failed. Skipping to next available node in chain..."
     fi
 done
 
