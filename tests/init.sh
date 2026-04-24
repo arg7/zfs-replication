@@ -55,6 +55,8 @@ ZEP_BIN=$(command -v zep)
 CHAIN=$(seq 1 "$NUM_NODES" | sed 's/^/node/' | paste -sd, -)
 POLICY=${POLICY:-fail}
 ZFS_FORCE=${ZFS_FORCE:-false}
+ZFS_RAW=${ZFS_RAW:-false}
+ZFS_RESUME=${ZFS_RESUME:-false}
 ZFS_RATE=${ZFS_RATE:-1M}
 ALERT_CRITICAL_THRESHOLD=${ALERT_CRITICAL_THRESHOLD:-0}
 ALERT_WARN_THRESHOLD=${ALERT_WARN_THRESHOLD:-0}
@@ -85,6 +87,8 @@ alert:info:threshold=$ALERT_INFO_THRESHOLD
 suspend=false
 user=root
 zfs:force=$ZFS_FORCE
+zfs:raw=$ZFS_RAW
+zfs:resume=$ZFS_RESUME
 zfs:rate=$ZFS_RATE
 EOF
 

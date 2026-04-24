@@ -209,15 +209,18 @@ zfsbud_core() {
     local ssh_t=$(resolve_ssh_timeout "$filesystem")
 
     # Configure flags based on properties
-    local use_raw=$(get_zfs_prop "zep:zfs:raw" "$filesystem")
-    local use_resume=$(get_zfs_prop "zep:zfs:resume" "$filesystem")
-    
+    local use_raw="false"
+    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
+
+    local use_resume="false"
+    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
+
     local send_args="-R"
     local recv_args="-u"
-    
+
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$REPL_FORCE" != "false" ]] && recv_args="-F $recv_args"
+    [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
 
     if [ -z "$dry_run" ]; then
       # FORCE CLEANUP of destination ONLY if --destroy-chain is set
@@ -268,15 +271,18 @@ zfsbud_core() {
     local ssh_t=$(resolve_ssh_timeout "$filesystem")
 
     # Configure flags based on properties
-    local use_raw=$(get_zfs_prop "zep:zfs:raw" "$filesystem")
-    local use_resume=$(get_zfs_prop "zep:zfs:resume" "$filesystem")
-    
+    local use_raw="false"
+    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
+
+    local use_resume="false"
+    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
+
     local send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\""
     local recv_args="-u"
-    
+
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$REPL_FORCE" != "false" ]] && recv_args="-F $recv_args"
+    [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
 
     if [ -z "$dry_run" ]; then
       if [ -n "$remote_shell" ]; then
@@ -362,8 +368,7 @@ zfsbud_core() {
        # Resume logic simplified
        if [ -z "$dry_run" ]; then
          local resume_recv_args="-u"
-         [[ "$REPL_FORCE" != "false" ]] && resume_recv_args="-F $resume_recv_args"
-         if [ -n "$remote_shell" ]; then
+         [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"         if [ -n "$remote_shell" ]; then
            zfs send $verbose -t "$resume_token" | mbuffer -q $mbuffer_throttle -m "$mbuffer_size" | zstd | $remote_shell "zstd -d | zfs recv $resume_recv_args ${remote_ds}"
          else
            zfs send $verbose -t "$resume_token" | zfs recv $resume_recv_args "${remote_ds}"
