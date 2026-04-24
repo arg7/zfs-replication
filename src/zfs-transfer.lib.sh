@@ -517,9 +517,6 @@ zfsbud_core() {
        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
-           if [[ "$REPL_FORCE" != "false" ]]; then
-               zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Using 'zfs recv -F' to sync."
-           fi
        fi
        send_incremental "$remote_ds" || return 1
     fi
