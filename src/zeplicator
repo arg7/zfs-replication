@@ -804,13 +804,23 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
     else
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Searching chain for a better donor..."
-        
-        if [[ "$IS_DONOR" == true ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
+        # If the destination currently has a split brain error, local replication likely failed due to 
+        # missing common snapshots. Donor discovery will also fail for the same reason. Skip it.
+        remote_sb=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
+        if [[ "$remote_sb" == "true" ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Skipping donor search because dataset is in a split-brain state."
             DONOR_NODE=""
+            SKIP_DONOR_SEARCH=true
         else
-            DONOR_NODE=$(find_best_donor "$hop_node" "$raw_filesystem")
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Searching chain for a better donor..."
+            SKIP_DONOR_SEARCH=false
+            
+            if [[ "$IS_DONOR" == true ]]; then
+                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
+                DONOR_NODE=""
+            else
+                DONOR_NODE=$(find_best_donor "$hop_node" "$raw_filesystem")
+            fi
         fi
 
         if [[ -n "$DONOR_NODE" ]]; then
@@ -839,7 +849,9 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Delegated replication from $DONOR_NODE failed."
             fi
         else
-            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
+            if [[ "$SKIP_DONOR_SEARCH" != true ]]; then
+                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
+            fi
         fi
     fi
 
