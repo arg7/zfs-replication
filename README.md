@@ -71,6 +71,7 @@ The following packages must be installed on all nodes:
 | `zep:node:<alias>:keep:<label>` | Host-specific retention. | `zep:node:node1:keep:min1=30` |
 | `zep:role:<role>:keep:<label>` | Role-based retention (`master`, `middle`, `sink`). | `zep:role:sink:keep:min1=90` |
 | `zep:user` | **(Global)** Fallback SSH user. | `root` |
+| `zep:snap_prefix` | Prefix for snapshots. | `zep_` |
 | `zep:zfs:raw` | Whether to use `zfs send -w` (raw, includes properties). Default: `false`. | `true` |
 | `zep:zfs:resume` | Whether to use `zfs recv -s` (resume support). Default: `false`. | `true` |
 | `zep:zfs:force` | If `false`, omits `-F` from `zfs receive` (Safe Mode). Default: `true`. | `false` |

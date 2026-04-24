@@ -43,8 +43,9 @@ resolve_retention() {
 
     echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄${C_RESET} Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
     
+    local prefix=$(get_snap_prefix "$ds")
     # Get snapshots matching label, sorted by creation date (newest first)
-    mapfile -t snaps < <(zfs list -t snap -H -o name,zep:shipped -S creation -r "$ds" | grep "@.*$lbl")
+    mapfile -t snaps < <(zfs list -t snap -H -o name,zep:shipped -S creation -r "$ds" | grep "@${prefix}${lbl}-")
     
     if [[ "$DRY_RUN" == true ]]; then
         # Inject virtual snapshots to simulate accurate count

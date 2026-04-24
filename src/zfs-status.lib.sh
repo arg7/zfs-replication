@@ -20,8 +20,11 @@ get_node_state() {
             props=$(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
             if [[ -n "$props" ]]; then
                 # Find unique labels for this filesystem
-                snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "zeplicator_")
-                labels=$(echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | cut -d"_" -f2 | cut -d"-" -f1 | sort -u)
+                prefix=$(echo "$props" | grep "zep:snap_prefix" | cut -f2)
+                [[ -z "$prefix" || "$prefix" == "-" ]] && prefix="zep_"
+                
+                snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
+                labels=$(echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u)
                 for label in $labels; do
                     [[ -z "$label" ]] && continue
                     
@@ -32,7 +35,7 @@ get_node_state() {
                         is_configured="true"
                     fi
 
-                    latest=$(echo "$snap_list" | grep "zeplicator_${label}-" | head -n 1)
+                    latest=$(echo "$snap_list" | grep "@${prefix}${label}-" | head -n 1)
                     if [[ -n "$latest" ]]; then
                         snap_name=$(echo "$latest" | awk "{print \$1}")
                         then=$(echo "$latest" | awk "{print \$2}")

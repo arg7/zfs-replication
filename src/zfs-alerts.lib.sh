@@ -16,7 +16,9 @@ send_smtp_alert() {
     [[ -z "$host" || -z "$to" ]] && return
 
     # --- Rate Limiting Logic ---
-    local state_dir="/tmp/zfs-repl-alerts"
+    local alias_val=${CLI_ALIAS:-$(hostname)}
+    local prefix=$(get_snap_prefix "$filesystem")
+    local state_dir="/tmp/${prefix}-${alias_val}-repl-alerts"
     mkdir -p "$state_dir"
     local ds_safe="${filesystem//\//-}"
     local state_file="${state_dir}/${ds_safe}.state"
@@ -66,9 +68,10 @@ send_smtp_alert() {
 
     # Include captured error details if they exist
     local detail=""
-    if [[ -f "/tmp/zfs-replication.err" ]]; then
-        detail=$(cat /tmp/zfs-replication.err)
-        rm -f /tmp/zfs-replication.err
+    local err_log="/tmp/${prefix}-${alias_val}-replication.err"
+    if [[ -f "$err_log" ]]; then
+        detail=$(cat "$err_log")
+        rm -f "$err_log"
     fi
 
     zbud_msg "  📧 Sending alert email to $to..."
