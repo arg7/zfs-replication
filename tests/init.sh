@@ -56,6 +56,9 @@ CHAIN=$(seq 1 "$NUM_NODES" | sed 's/^/node/' | paste -sd, -)
 POLICY=${POLICY:-fail}
 ZFS_FORCE=${ZFS_FORCE:-false}
 ZFS_RATE=${ZFS_RATE:-1M}
+ALERT_CRITICAL_THRESHOLD=${ALERT_CRITICAL_THRESHOLD:-0}
+ALERT_WARN_THRESHOLD=${ALERT_WARN_THRESHOLD:-0}
+ALERT_INFO_THRESHOLD=${ALERT_INFO_THRESHOLD:-0}
 
 # Generate master config file
 CONFIG_FILE="/tmp/zep-master.conf"
@@ -76,6 +79,9 @@ smtp:protocol=$SMTP_PROTOCOL
 smtp:starttls=$SMTP_STARTTLS
 smtp:to=$SMTP_TO
 smtp:user=$SMTP_USER
+alert:critical:threshold=$ALERT_CRITICAL_THRESHOLD
+alert:warn:threshold=$ALERT_WARN_THRESHOLD
+alert:info:threshold=$ALERT_INFO_THRESHOLD
 suspend=false
 user=root
 zfs:force=$ZFS_FORCE

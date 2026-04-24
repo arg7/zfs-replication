@@ -2,5 +2,3 @@ build/
 data.conf
 test.conf
 *.img
-log/
-*/log/

@@ -34,38 +34,39 @@ tmux split-window -h -l 30% -t "$SESSION_NAME:0.0" 2>/dev/null || tmux split-win
 # Split the right pane vertically: lower pane takes 30% height (leaving 70% for the upper pane)
 tmux split-window -v -l 30% -t "$SESSION_NAME:0.1" 2>/dev/null || tmux split-window -v -l 12 -t "$SESSION_NAME:0.1"
 
-# Split the new right lower pane (Pane 2) horizontally to create space for the SMTP server
-tmux split-window -h -l 50% -t "$SESSION_NAME:0.2"
+# Split the left pane vertically: lower pane takes 30% height (for SMTP Server)
+tmux split-window -v -l 30% -t "$SESSION_NAME:0.0" 2>/dev/null || tmux split-window -v -l 12 -t "$SESSION_NAME:0.0"
 
 # Now we have:
-# Pane 0: Left main test window
-# Pane 1: Right upper (watch status)
-# Pane 2: Right lower left (bash for traffic/network simulation)
-# Pane 3: Right lower right (SMTP Server)
+# Pane 0: Left main test window (Top)
+# Pane 1: Left lower (SMTP Server)
+# Pane 2: Right upper (watch status)
+# Pane 3: Right lower (bash for traffic/network simulation)
 
 # Set up left main pane (Pane 0)
 tmux send-keys -t "$SESSION_NAME:0.0" "clear" C-m
 tmux send-keys -t "$SESSION_NAME:0.0" "echo '=== Main Test Window ==='" C-m
 tmux send-keys -t "$SESSION_NAME:0.0" "echo 'Run your test scripts or interact with zep here.'" C-m
 
-# Set up right upper pane (Pane 1) - Watch zep status
+# Set up left lower pane (Pane 1) - SMTP Server
+tmux send-keys -t "$SESSION_NAME:0.1" "clear" C-m
+tmux send-keys -t "$SESSION_NAME:0.1" "$SCRIPT_DIR/smtp_debug.py 1025 --show-mail-only --use-color" C-m
+
+# Set up right upper pane (Pane 2) - Watch zep status
 # We'll default to monitoring the dataset on the first node
 DATASET_TO_WATCH="zep-node-1/test-1"
 ZEP_BIN="$SCRIPT_DIR/../build/zep"
-tmux send-keys -t "$SESSION_NAME:0.1" "watch --color -n 10 $ZEP_BIN $DATASET_TO_WATCH --status --force-color" C-m
+tmux send-keys -t "$SESSION_NAME:0.2" "watch --color -n 10 $ZEP_BIN $DATASET_TO_WATCH --status --force-color" C-m
 
-# Set up right lower left pane (Pane 2) - Traffic / Network simulator
-tmux send-keys -t "$SESSION_NAME:0.2" "clear" C-m
-tmux send-keys -t "$SESSION_NAME:0.2" "echo '=== Simulator Shell ==='" C-m
-tmux send-keys -t "$SESSION_NAME:0.2" "echo 'Use this pane to edit /etc/hosts or generate disk traffic.'" C-m
-
-# Set up right lower right pane (Pane 3) - SMTP Server
+# Set up right lower pane (Pane 3) - Traffic / Network simulator
 tmux send-keys -t "$SESSION_NAME:0.3" "clear" C-m
-tmux send-keys -t "$SESSION_NAME:0.3" "$SCRIPT_DIR/smtp_debug.py 1025" C-m
+tmux send-keys -t "$SESSION_NAME:0.3" "echo '=== Simulator Shell ==='" C-m
+tmux send-keys -t "$SESSION_NAME:0.3" "echo 'Use this pane to edit /etc/hosts or generate disk traffic.'" C-m
 
 # Select the main left pane as the active one
 tmux select-pane -t "$SESSION_NAME:0.0"
 
 # Attach to the session
 echo "Attaching to tmux session '$SESSION_NAME'..."
+tmux set -t "$SESSION_NAME" mouse on
 tmux attach-session -t "$SESSION_NAME"
