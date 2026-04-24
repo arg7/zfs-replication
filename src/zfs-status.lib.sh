@@ -40,7 +40,12 @@ get_node_state() {
                         now=$(date +%s)
                         if [[ -n "$then" ]]; then
                             age=$(( (now - then) / 60 ))
-                            echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat"
+                            
+                            # Check for split-brain error flag
+                            has_sb=$(echo "$props" | grep ":error:split-brain" | cut -f2)
+                            [[ "$has_sb" != "true" ]] && has_sb="false"
+                            
+                            echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat|$has_sb"
                         fi
                     fi
                 done
@@ -89,7 +94,7 @@ cmd_status() {
         filesystems=""
         while read -r line; do
             [[ -z "$line" ]] && continue
-            IFS='|' read -r _ _ label _ age conf hb <<< "$line"
+            IFS='|' read -r _ _ label _ age conf hb has_sb <<< "$line"
             
             # Heartbeat Logic
             if [[ -n "$hb" && "$hb" != "-" ]]; then
@@ -110,6 +115,10 @@ cmd_status() {
             fi
             
             c_logic="GREEN"; [[ $age -ge $((hb*5)) ]] && c_logic="YELLOW"; [[ $age -ge $((hb*10)) ]] && c_logic="RED"
+            
+            # Split-Brain forces RED
+            [[ "$has_sb" == "true" ]] && c_logic="RED"
+            
             filesystems+="${line}|${c_logic}"$'\n'
         done <<< "$filesystems_raw"
 
@@ -119,6 +128,7 @@ cmd_status() {
         pool_max_status="GREEN"
         pool_has_check=""
         pool_has_full=""
+        pool_has_sb=""
         for p_name in $relevant_pools; do
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
             health=$(echo "$p_line" | awk '{print $2}')
@@ -128,6 +138,12 @@ cmd_status() {
             if [[ "$pool_max_status" != "RED" && "$cap" -ge 40 ]]; then pool_max_status="YELLOW"; fi
             if [[ "$cap" -ge 80 ]]; then pool_max_status="RED"; fi
             if [[ "$cap" -ge 40 ]]; then pool_has_full="true"; fi
+            
+            # Bubble split-brain to pool
+            if echo "$filesystems" | grep -q "^FILESYSTEM|$p_name|.*|true|RED$"; then
+                pool_max_status="RED"
+                pool_has_sb="true"
+            fi
         done
 
         # Aggregate Node status
@@ -149,6 +165,9 @@ cmd_status() {
         if [[ $node_reachable -eq 0 ]]; then
             n_parts=()
             
+            # Add split-brain tag to node
+            if [[ "$pool_has_sb" == "true" ]]; then n_parts+=("${C_RED}${C_BLINK}[split-brain]${C_RESET}"); fi
+
             snap_desc=""
             if [[ "$filesystems" =~ \|RED$'\n' ]]; then snap_desc="stale"
             elif [[ "$filesystems" =~ \|YELLOW$'\n' ]]; then snap_desc="late"
@@ -196,18 +215,27 @@ cmd_status() {
 
             # Use process substitution or a read loop from a string to preserve state if needed,
             # but since we already evaluated colors, we just read them.
-            while read -r ds; do
-                [[ -z "$ds" ]] && continue
-                ds_lines=$(echo "$filesystems" | grep "^FILESYSTEM|$ds|")
+            while read -r ds_path; do
+                [[ -z "$ds_path" ]] && continue
+                ds_lines=$(echo "$filesystems" | grep "^FILESYSTEM|$ds_path|")
+                
+                # Evaluate dataset-level split-brain and status
+                has_sb_ds="false"
+                if echo "$ds_lines" | grep -q "|true|RED$"; then has_sb_ds="true"; fi
+                
                 ds_status="GREEN"
                 [[ "$ds_lines" =~ \|RED$'\n' ]] && ds_status="RED"
                 [[ "$ds_status" != "RED" && "$ds_lines" =~ \|YELLOW$'\n' ]] && ds_status="YELLOW"
 
                 c_ds=$C_GREEN; [[ "$ds_status" == "YELLOW" ]] && c_ds=$C_YELLOW; [[ "$ds_status" == "RED" ]] && c_ds=$C_RED
-                echo -e "    ${c_ds}📁${C_RESET} $(basename "$ds")"
+                
+                sb_label=""
+                [[ "$has_sb_ds" == "true" ]] && sb_label=" ${C_RED}${C_BLINK}[split-brain]${C_RESET}"
+                
+                echo -e "    ${c_ds}📁${C_RESET} ${ds_path#$p_name/}${sb_label}"
                 while read -r line; do
                     [[ -z "$line" ]] && continue
-                    IFS='|' read -r _ _ label _ age conf hb c_logic <<< "$line"
+                    IFS='|' read -r _ _ label _ age conf hb has_sb_line c_logic <<< "$line"
 
                     age_str=$(format_minutes "$age")
                     label_desc=""

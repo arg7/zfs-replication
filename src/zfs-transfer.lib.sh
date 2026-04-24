@@ -293,6 +293,10 @@ zfsbud_core() {
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then
+           if [[ -s /tmp/zfs-replication.err ]] && ! grep -vq "destination already exists" /tmp/zfs-replication.err; then
+               zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
+               return 0
+           fi
            zbud_msg "Pipeline failed with status $status"
            if [[ -f /tmp/zfs-replication.err ]]; then
                while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < /tmp/zfs-replication.err
@@ -302,6 +306,10 @@ zfsbud_core() {
       else
         > /tmp/zfs-replication.err
         ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && {
+           if [[ -s /tmp/zfs-replication.err ]] && ! grep -vq "destination already exists" /tmp/zfs-replication.err; then
+               zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
+               return 0
+           fi
            zbud_msg "Pipeline failed"
            if [[ -f /tmp/zfs-replication.err ]]; then
                while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < /tmp/zfs-replication.err
