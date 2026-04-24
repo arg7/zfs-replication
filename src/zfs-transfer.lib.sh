@@ -334,6 +334,7 @@ zfsbud_core() {
     zbud_msg "  ${C_BLUE}📦${C_RESET} Processing $local_ds -> ${destination_parent_filesystem} (Target: ${remote_ds})"
     
     REPL_FORCE=$(get_zfs_prop "zep:zfs:force" "$filesystem")
+    [[ "$initial" == "1" ]] && REPL_FORCE="true"
 
     # Resolve Throttling and Buffering
     local throttle=$(get_zfs_prop "zep:throttle" "$filesystem")

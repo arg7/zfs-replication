@@ -19,21 +19,41 @@ POOL_SIZE=${POOL_SIZE:-128M}
 echo "Building zep..."
 make -C "$SCRIPT_DIR/.." > /dev/null
 
-ZEP_BIN="$SCRIPT_DIR/../build/zep"
+# Dependency Check
+SYSTEM_DEPS=("zfs" "zpool" "ssh" "mbuffer" "zstd" "curl" "tmux")
+PROJECT_DEPS=("zep" "iomon")
+MISSING_SYSTEM=()
+MISSING_PROJECT=()
+
+for dep in "${SYSTEM_DEPS[@]}"; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+        MISSING_SYSTEM+=("$dep")
+    fi
+done
+
+for dep in "${PROJECT_DEPS[@]}"; do
+    if ! command -v "$dep" >/dev/null 2>&1; then
+        MISSING_PROJECT+=("$dep")
+    fi
+done
+
+if [ ${#MISSING_SYSTEM[@]} -ne 0 ] || [ ${#MISSING_PROJECT[@]} -ne 0 ]; then
+    if [ ${#MISSING_SYSTEM[@]} -ne 0 ]; then
+        echo "Error: Missing system dependencies: ${MISSING_SYSTEM[*]}"
+        echo "Please install them (e.g., sudo apt install zfsutils-linux openssh-client mbuffer zstd curl tmux)"
+    fi
+    if [ ${#MISSING_PROJECT[@]} -ne 0 ]; then
+        echo "Error: Missing project binaries: ${MISSING_PROJECT[*]}"
+        echo "Please run: sudo make install"
+    fi
+    exit 1
+fi
+
+ZEP_BIN=$(command -v zep)
 
 # ZEP Properties from conf or defaults
-if [[ -z "$CHAIN" ]]; then
-    CHAIN=$(seq -s, 1 "$NUM_NODES" | sed 's/[0-9]*/node&/g')
-fi
+CHAIN=$(seq 1 "$NUM_NODES" | sed 's/^/node/' | paste -sd, -)
 POLICY=${POLICY:-fail}
-SMTP_FROM=${SMTP_FROM}
-SMTP_HOST=${SMTP_HOST}
-SMTP_PASSWORD=${SMTP_PASSWORD}
-SMTP_PORT=${SMTP_PORT}
-SMTP_PROTOCOL=${SMTP_PROTOCOL}
-SMTP_STARTTLS=${SMTP_STARTTLS}
-SMTP_TO=${SMTP_TO}
-SMTP_USER=${SMTP_USER}
 ZFS_FORCE=${ZFS_FORCE:-false}
 ZFS_RATE=${ZFS_RATE:-1M}
 
@@ -100,11 +120,20 @@ for i in $(seq 1 "$NUM_NODES"); do
         echo "DNS entry for $DNS_NAME already exists."
     fi
 
-    # Import configuration using zep
-    echo "Importing configuration to $DATASET_NAME using zep..."
-    "$ZEP_BIN" "$DATASET_NAME" --alias node1 --config --import "$CONFIG_FILE"
+    # Add to known_hosts
+    if ! ssh-keygen -F "$DNS_NAME" >/dev/null 2>&1; then
+        echo "Adding $DNS_NAME to ~/.ssh/known_hosts"
+        ssh-keyscan -H "$DNS_NAME" >> ~/.ssh/known_hosts 2>/dev/null
+    else
+        echo "$DNS_NAME is already in known_hosts."
+    fi
 
-    echo "Successfully created and configured $DATASET_NAME"
+    echo "Successfully created $DATASET_NAME"
 done
+
+# Import configuration once on the Master node
+MASTER_DATASET="zep-node-1/test-1"
+echo "Importing configuration to $MASTER_DATASET using zep..."
+"$ZEP_BIN" "$MASTER_DATASET" --alias node1 --config --import "$CONFIG_FILE"
 
 echo "Initialization complete."

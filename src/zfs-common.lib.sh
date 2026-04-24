@@ -301,8 +301,7 @@ die() {
             rm -f "/tmp/zfs-replication.hint"
         elif [[ "$exit_code" -eq 1 ]]; then
             echo -e "${C_BOLD}HINT: If replication failed because there is no common ground:${C_RESET}"
-            echo "  - For a new destination: try adding the '--initial' flag."
-            echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
+            echo "  - For a new destination: try adding the '--init' flag."            echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
             echo "  - To force a fresh start (DANGER): use '--promote --destroy-chain' on the Master."
         fi
     fi

@@ -160,7 +160,7 @@ zep pool/mydata min1 10 --alias node2
 ### Initial Replication
 For the first run (no common snapshots downstream). Sends a success email upon completion.
 ```bash
-zep pool/mydata --initial
+zep pool/mydata --init
 ```
 
 ### Master Promotion & Recovery

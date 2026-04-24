@@ -36,7 +36,7 @@ Primary Flags:
                     Mocks snapshot creation, transfers, property sync, and rotation.
   --auto            Automatically resolve latest common snapshot during promotion.
   --promote         Promote the local node to Master in the replication chain.
-  --initial         Perform an initial replication (uses full stream, mbuffer/zstd).
+  --init            Perform an initial replication (uses full stream, mbuffer/zstd).
   --suspend/resume  Suspend or resume replication across the entire chain.
   --config          Enter configuration mode to view/set/clear 'zep:' ZFS properties.
   --status          Probe and display system status for the replication chain.
@@ -100,7 +100,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h) usage ;;
         --alias) CLI_ALIAS="$2"; shift 2 ;;
         --mark-only) MARK_ONLY=true; shift ;;
-        --initial) initial_send=true; shift ;;
+        --init) initial_send=true; shift ;;
         -bw) export ZEP_BW="true"; shift ;;
         --force-color) export ZEP_FORCE_COLOR="true"; shift ;;
         --promote) PROMOTE=true; shift ;;
@@ -572,7 +572,7 @@ CHAIN_PREFIX=""
 if [[ -n "$REPL_CHAIN" ]]; then
     IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
     
-    # Pre-flight dependency check (only if --initial is set and NOT a cascaded call)
+    # Pre-flight dependency check (only if --init is set and NOT a cascaded call)
     if [[ "$initial_send" == true && "$CASCADED" == false ]]; then
         echo -e "${CHAIN_PREFIX}  ${C_CYAN}🛠️${C_RESET}  Pre-flight: Checking dependencies (mbuffer, zstd) across all nodes..."
         for n in "${nodes[@]}"; do
@@ -581,7 +581,7 @@ if [[ -n "$REPL_CHAIN" ]]; then
             
             echo -e "${CHAIN_PREFIX}    ${C_CYAN}🔍${C_RESET} Checking $n ($n_fqdn)..."
             if ! timeout "$((REPL_SSH_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "${n_user}@${n_fqdn}" "which mbuffer >/dev/null && which zstd >/dev/null"; then
-                die "Missing dependencies (mbuffer or zstd) or connection timeout on node: $n ($n_fqdn). Please install them before proceeding with --initial."
+                die "Missing dependencies (mbuffer or zstd) or connection timeout on node: $n ($n_fqdn). Please install them before proceeding with --init."
             fi
         done
         echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} All nodes verified."
@@ -848,7 +848,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         if [[ "$PROMOTE" == false && "$IS_DONOR" == false ]]; then
             echo -e "${CHAIN_PREFIX}  ${C_BLUE}🔗${C_RESET} Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
             casc_opts="--alias $hop_node"
-            if [[ "$initial_send" == true ]]; then casc_opts+=" --initial"; fi
+            if [[ "$initial_send" == true ]]; then casc_opts+=" --init"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
             if [[ "$ZEP_BW" == "true" ]]; then casc_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then casc_opts+=" --force-color"; fi
