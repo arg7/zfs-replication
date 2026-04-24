@@ -2,6 +2,17 @@
 
 # zfs-common.lib.sh - Shared utility functions for Zeplicator
 
+# Audit logging for ZFS/ZPOOL commands
+zfs() {
+    log_message "AUDIT: zfs $*"
+    command zfs "$@"
+}
+
+zpool() {
+    log_message "AUDIT: zpool $*"
+    command zpool "$@"
+}
+
 get_zfs_prop() {
     local prop=$1
     local ds=$2

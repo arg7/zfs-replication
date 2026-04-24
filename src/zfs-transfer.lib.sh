@@ -215,7 +215,7 @@ zfsbud_core() {
     local use_resume="false"
     [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
 
-    local send_args="-R"
+    local send_args="-R -v"
     local recv_args="-u"
 
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
@@ -233,11 +233,19 @@ zfsbud_core() {
         fi
       fi
 
+      local lock_path="${LOCKFILE:-/tmp/zeplicator-default.lock}"
+      > "${lock_path}.cnt" # Reset counter
+      > /tmp/zfs-replication.err # Clear log
+
       if [ -n "$remote_shell" ]; then
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       else
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
+        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && return 1
       fi
+
+      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null || echo 0)
+      local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
+      log_message "REPLICATION: Successfully sent initial replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
 
       local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
       if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
@@ -277,7 +285,7 @@ zfsbud_core() {
     local use_resume="false"
     [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
 
-    local send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\""
+    local send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\" -v"
     local recv_args="-u"
 
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
@@ -285,6 +293,9 @@ zfsbud_core() {
     [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
 
     if [ -z "$dry_run" ]; then
+      local lock_path="${LOCKFILE:-/tmp/zeplicator-default.lock}"
+      > "${lock_path}.cnt" # Reset counter
+
       if [ -n "$remote_shell" ]; then
         # Update lock file with destination info for progress monitoring
         if [[ -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
@@ -295,7 +306,7 @@ zfsbud_core() {
         # Clear error log
         > /tmp/zfs-replication.err
         # We use a subshell on the remote to capture its stderr and print it to stdout so we can catch it locally
-        timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
+        timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>/tmp/zfs-replication.err | zstd 2>>/tmp/zfs-replication.err | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>/tmp/zfs-replication.err"
         local status=$?
         set +o pipefail
         if [[ $status -ne 0 ]]; then
@@ -311,7 +322,7 @@ zfsbud_core() {
         fi
       else
         > /tmp/zfs-replication.err
-        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"${LOCKFILE:-/tmp/zeplicator-default.lock}\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && {
+        ! timeout "$timeout_val" bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>/tmp/zfs-replication.err | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>/tmp/zfs-replication.err" && {
            if [[ -s /tmp/zfs-replication.err ]] && ! grep -vq "destination already exists" /tmp/zfs-replication.err; then
                zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
                return 0
@@ -323,6 +334,10 @@ zfsbud_core() {
            return 1
         }
       fi
+
+      local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null || echo 0)
+      local snap_count=$(grep -c "send from" /tmp/zfs-replication.err || echo 0)
+      log_message "REPLICATION: Successfully sent incremental replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size bytes)"
 
       local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
       if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
@@ -368,7 +383,8 @@ zfsbud_core() {
        # Resume logic simplified
        if [ -z "$dry_run" ]; then
          local resume_recv_args="-u"
-         [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"         if [ -n "$remote_shell" ]; then
+         [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"
+         if [ -n "$remote_shell" ]; then
            zfs send $verbose -t "$resume_token" | mbuffer -q $mbuffer_throttle -m "$mbuffer_size" | zstd | $remote_shell "zstd -d | zfs recv $resume_recv_args ${remote_ds}"
          else
            zfs send $verbose -t "$resume_token" | zfs recv $resume_recv_args "${remote_ds}"

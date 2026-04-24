@@ -80,6 +80,7 @@ resolve_retention() {
         return
     fi
     
+    local purged_count=0
     # Process snapshots from index k_count (0-indexed)
     for (( i=k_count; i<count; i++ )); do
         local line="${snaps[i]}"
@@ -99,9 +100,13 @@ resolve_retention() {
             else
                 echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  Purging old shipped snapshot: $snap_name"
                 zfs destroy "$snap_name"
+                purged_count=$((purged_count + 1))
             fi
         else
             echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
         fi
     done
+    if [[ "$purged_count" -gt 0 ]]; then
+        log_message "ROTATION: Purged $purged_count old shipped snapshot(s) from $ds (label: $lbl, kept: $k_count)"
+    fi
 }
