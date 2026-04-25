@@ -20,6 +20,11 @@ get_node_state() {
             echo "ZPOOL:$line"
         done
 
+        # 2. Zpool IO stats (one-second sample)
+        zpool iostat -H 1 1 2>/dev/null | while read -r line; do
+            echo "IOSTAT:$line"
+        done
+
         # 2. Filesystems with zep: properties
         zfs list -H -o name -r "'$raw_ds'" 2>/dev/null | while read -r ds; do
             props=$(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
@@ -104,17 +109,32 @@ cmd_status() {
     for n in "${nodes[@]}"; do
         idx=$((idx + 1))
         node_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
+        node_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
 
         # Determine node role
         local node_role="middle"
         [[ $idx -eq 1 ]] && node_role="master"
         [[ $idx -eq ${#nodes[@]} ]] && node_role="sink"
 
+        # Measure ping to node (local node gets "local")
+        local ping_str="local"
+        if [[ "$n" != "$(get_local_alias "$raw_filesystem" "")" ]]; then
+            local ping_ms
+            ping_ms=$(ping -c 1 -W 2 "$node_fqdn" 2>/dev/null | grep -oP 'time[=/]\K[0-9.]+' | head -1 || echo "")
+            if [[ -n "$ping_ms" ]]; then
+                ping_ms=$(printf "%.0f" "$ping_ms")
+                ping_str="${ping_ms}ms"
+            else
+                ping_str="down"
+            fi
+        fi
+
         out=$(get_node_state "$n" "$node_ds" "$node_role")
         
         node_reachable=$?
         
         zpools=$(echo "$out" | grep "^ZPOOL:" | cut -d':' -f2-)
+        iostats=$(echo "$out" | grep "^IOSTAT:" | cut -d':' -f2-)
         filesystems_raw=$(echo "$out" | grep "^FILESYSTEM|")
         
         # Pre-evaluate filesystem colors to allow hierarchical bubbling
@@ -172,7 +192,8 @@ cmd_status() {
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
             health=$(echo "$p_line" | awk '{print $2}')
             cap=$(echo "$p_line" | awk '{print $3}' | tr -d '%')
-            
+            free_pct=$((100 - cap))
+
             if [[ "$health" != "ONLINE" ]]; then pool_max_status="RED"; pool_has_check="true"; fi
             if [[ "$pool_max_status" != "RED" && "$cap" -ge 40 ]]; then pool_max_status="YELLOW"; fi
             if [[ "$cap" -ge 80 ]]; then pool_max_status="RED"; fi
@@ -237,14 +258,18 @@ cmd_status() {
         fi
 
         c_node=$C_GREEN; [[ "$n_status" == "YELLOW" ]] && c_node=$C_YELLOW; [[ "$n_status" == "RED" ]] && c_node=$C_RED
-        echo -e "${c_node}●${C_RESET} $n${n_desc}"
+
+        [[ $idx -gt 1 ]] && echo ""
+        ping_color=$C_GREEN; [[ "$ping_str" == "down" ]] && ping_color=$C_RED
+        echo -e "${c_node}●${C_RESET} $n (${node_fqdn}, ping: ${ping_color}${ping_str}${C_RESET})${n_desc}"
         [[ $node_reachable -ne 0 ]] && { echo -e "  ${C_RED}  [UNREACHABLE]${C_RESET}"; continue; }
         
         for p_name in $relevant_pools; do
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
             health=$(echo "$p_line" | awk '{print $2}')
             cap=$(echo "$p_line" | awk '{print $3}' | tr -d '%')
-            
+            free_pct=$((100 - cap))
+
             p_status="GREEN"
             p_desc=""
             if [[ "$health" != "ONLINE" ]]; then p_status="RED"; p_desc=" [check]"; fi
@@ -260,7 +285,26 @@ cmd_status() {
             [[ "$p_status" != "RED" && "$ds_statuses" =~ \|YELLOW$'\n' ]] && p_status="YELLOW"
 
             c_pool=$C_GREEN; [[ "$p_status" == "YELLOW" ]] && c_pool=$C_YELLOW; [[ "$p_status" == "RED" ]] && c_pool=$C_RED
-            echo -e "  ${c_pool}💾${C_RESET} $p_name ($health, $cap%)${p_desc}"
+            echo -e "  ${c_pool}💾${C_RESET} $p_name | $health, ${free_pct}% free${p_desc}"
+
+            # IO stats for this pool
+            io_line=$(echo "$iostats" | awk -v p="$p_name" '$1 == p')
+            if [[ -n "$io_line" ]]; then
+                read -r _ _ _ io_r io_w bw_r bw_w <<< "$io_line"
+                io_str=""
+                [[ -n "$io_r" && "$io_r" != "0" ]] && io_str+="${io_r}r/s "
+                [[ -n "$io_w" && "$io_w" != "0" ]] && io_str+="${io_w}w/s "
+                [[ -n "$bw_r" && "$bw_r" != "0" ]] && io_str+="${bw_r}R/s "
+                [[ -n "$bw_w" && "$bw_w" != "0" ]] && io_str+="${bw_w}W/s"
+                io_str="${io_str% }"  # strip trailing space
+                if [[ -n "$io_str" ]]; then
+                    # Build same prefix as pool line, replace "💾" → " " and " |" → "└─"
+                    pool_prefix="  💾 $p_name |"
+                    visual_len=$((5 + ${#p_name} + 1))  # "  💾 " + name + space
+                    indent=$(printf "%${visual_len}s" "")
+                    echo -e "${C_DIM}${indent}└─ io: $io_str${C_RESET}"
+                fi
+            fi
 
             # Use process substitution or a read loop from a string to preserve state if needed,
             # but since we already evaluated colors, we just read them.

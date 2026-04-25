@@ -140,9 +140,12 @@ zep pool/mydata --status
 ```
 
 Features:
+- **Node Connectivity**: Each node shows its FQDN and ping latency from the current host (e.g., `node1 (host.local, ping: 2ms)`). The local node shows `ping: local`.
 - **Hierarchical Health Aggregation**: The health state (Green/Yellow/Red) bubbles up from snapshots $\rightarrow$ datasets $\rightarrow$ zpools $\rightarrow$ nodes. If any snapshot is critical, the entire dataset, its pool, and the node will be marked red.
 - **Visual Icons**: Uses simple indicators: `●` for nodes, `💾` for pools, and `📁` for datasets.
-- **Zpool Capacity Monitoring**: Automatically flags zpools as Warning (yellow) if usage $\ge$ 40% and Critical (red) if $\ge$ 80% or if the pool is offline.
+- **Zpool Capacity Monitoring**: Automatically flags zpools as Warning (yellow) if usage $\ge$ 40% and Critical (red) if $\ge$ 80% or if the pool is offline. Free space percentage is displayed inline.
+- **IO Bandwidth Monitor**: Real-time IO statistics per zpool from `zpool iostat` (ops/sec and bandwidth), indented to align with the pool name.
+- **Retention Tracking**: Snapshot count shown per label (e.g., `min1(15)`) with a color-coded retained percentage warning when below 100% (e.g., `[retained 35%]`). Color thresholds: <30% = red, <60% = yellow.
 - **Smart Heartbeat Parsing**: Snapshot freshness is validated against the `zep:alert:heartbeat:<label>` property. If unconfigured, the script intelligently parses time values directly from the label (e.g., `min15`, `hour2`, `day1`).
 - **Unconfigured Detection**: Highlights snapshots that exist but have no retention policy configured (`[unconfigured]`).
 - **Automation Ready**: Returns precise shell exit codes (`0` = OK, `1` = Warning, `2` = Critical) for monitoring integrations.
