@@ -37,30 +37,37 @@ cache_zfs_props() {
     for key in "${!ZEP_PROP_DEFAULTS[@]}"; do
         ZEP_PROP_CACHE["${ds}:${key}"]="${ZEP_PROP_DEFAULTS[$key]}"
     done
-    # Fetch only zep: properties from ZFS (overrides defaults where set)
-    local zep_props="zep:snap_prefix,zep:ssh:timeout,zep:proc:timeout,zep:suspend,zep:zfs:force,zep:zfs:resume,zep:zfs:raw,zep:throttle,zep:mbuffer_size,zep:debug:send_delay,zep:chain"
+    # Fetch all zep: properties from ZFS (overrides defaults where set)
     while IFS=$'\t' read -r prop val; do
         [[ "$val" == "-" ]] && continue  # keep default for unset
         [[ "$prop" =~ :(shipped|alias|suspend)$ ]] && continue
         ZEP_PROP_CACHE["${ds}:${prop}"]="$val"
-    done < <(zfs get -H -o property,value "$zep_props" "$ds" 2>/dev/null)
-    # Extract chain and batch-fetch node-specific props in one call
+    done < <(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
+    # Batch-fetch remaining per-node props in one call (chain node props not yet cached)
     local chain="${ZEP_PROP_CACHE["${ds}:zep:chain"]:-}"
     if [[ -n "$chain" ]]; then
         IFS=',' read -ra chain_nodes <<< "$chain"
-        local node_props="zep:user"
+        local node_props=""
         for n in "${chain_nodes[@]}"; do
-            node_props+=",zep:node:${n}:user,zep:node:${n}:fqdn,zep:node:${n}:fs"
+            local k_user="${ds}:zep:node:${n}:user"
+            local k_fqdn="${ds}:zep:node:${n}:fqdn"
+            local k_fs="${ds}:zep:node:${n}:fs"
+            [[ -z "${ZEP_PROP_CACHE[$k_user]+x}" ]] && node_props+="zep:node:${n}:user,"
+            [[ -z "${ZEP_PROP_CACHE[$k_fqdn]+x}" ]] && node_props+="zep:node:${n}:fqdn,"
+            [[ -z "${ZEP_PROP_CACHE[$k_fs]+x}" ]] && node_props+="zep:node:${n}:fs,"
         done
-        local vals
-        vals=$(zfs get -H -o value "$node_props" "$ds" 2>/dev/null)
-        local i=0
-        IFS=',' read -ra props_arr <<< "$node_props"
-        while IFS= read -r val; do
-            [[ -z "$val" ]] && val="-"
-            ZEP_PROP_CACHE["${ds}:${props_arr[$i]}"]="$val"
-            ((i++))
-        done <<< "$vals"
+        if [[ -n "$node_props" ]]; then
+            node_props="${node_props%,}"  # strip trailing comma
+            local vals
+            vals=$(zfs get -H -o value "$node_props" "$ds" 2>/dev/null)
+            local i=0
+            IFS=',' read -ra props_arr <<< "$node_props"
+            while IFS= read -r val; do
+                [[ -z "$val" ]] && val="-"
+                ZEP_PROP_CACHE["${ds}:${props_arr[$i]}"]="$val"
+                ((i++))
+            done <<< "$vals"
+        fi
     fi
 }
 
