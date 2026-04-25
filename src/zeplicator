@@ -803,13 +803,89 @@ if [[ -n "$REPL_CHAIN" ]]; then
     dry_flag=""
     [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
     echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+
+    # Validate label has configured retention policies
+    validate_label() {
+        local lbl=$1
+        local ds=$2
+        local node_list=("${nodes[@]}")
+        local idx=$ME_INDEX
+        local local_role
+        [[ $idx -eq 0 ]] && local_role="master" || { [[ $idx -eq $((${#node_list[@]}-1)) ]] && local_role="sink" || local_role="middle"; }
+
+        # Check if ANY role has a retention configured for this label
+        local found=false
+        for r in master middle sink; do
+            local v=$(zfs get -H -o value "zep:role:${r}:keep:${lbl}" "$ds" 2>/dev/null)
+            if [[ -n "$v" && "$v" != "-" && "$v" =~ ^[0-9]+$ ]]; then
+                found=true
+                break
+            fi
+        done
+
+        # Also check node-specific retention
+        if [[ "$found" != true ]]; then
+            local node_val=$(zfs get -H -o value "zep:node:${ME}:keep:${lbl}" "$ds" 2>/dev/null)
+            [[ -n "$node_val" && "$node_val" != "-" && "$node_val" =~ ^[0-9]+$ ]] && found=true
+        fi
+
+        if [[ "$found" != true ]]; then
+            # Collect available labels for helpful error message
+            local available=$(zfs get -H -o property "$ds" 2>/dev/null | grep 'role:.*:keep:' | sed 's/.*role:[a-z]*:keep://' | sort -u | tr '\n' ', ' | sed 's/,$//')
+            if [[ -n "$available" ]]; then
+                die "ERR: Label '$lbl' has no retention policy configured (checked role:${local_role}). Available labels: $available"
+            else
+                die "ERR: Label '$lbl' has no retention policy configured. Set zep:role:${local_role}:keep:${lbl} on $ds"
+            fi
+        fi
+    }
+
+    validate_label "$label" "$local_ds"
+
+    dry_flag=""
+    [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
+    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+
     RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
-    echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP (Role: $( [[ $ME_INDEX -eq 0 ]] && echo "master" || ( [[ $ME_INDEX -eq $((${#nodes[@]}-1)) ]] && echo "sink" || echo "middle" ) ))"
     fi
 
 if [[ -n "$TARGET_NODE" ]]; then
     NODES_REMAINING=("$TARGET_NODE")
     IS_MASTER=true
+
+    # Validate label for point-to-point transfers
+    validate_label_p2p() {
+        local lbl=$1
+        local ds=$2
+        local found=false
+        for r in master middle sink; do
+            local v=$(zfs get -H -o value "zep:role:${r}:keep:${lbl}" "$ds" 2>/dev/null)
+            if [[ -n "$v" && "$v" != "-" && "$v" =~ ^[0-9]+$ ]]; then
+                found=true
+                break
+            fi
+        done
+        if [[ "$found" != true ]]; then
+            local node_val=$(zfs get -H -o value "zep:node:${ME}:keep:${lbl}" "$ds" 2>/dev/null)
+            [[ -n "$node_val" && "$node_val" != "-" && "$node_val" =~ ^[0-9]+$ ]] && found=true
+        fi
+        if [[ "$found" != true ]]; then
+            local available=$(zfs get -H -o property "$ds" 2>/dev/null | grep 'role:.*:keep:' | sed 's/.*role:[a-z]*:keep://' | sort -u | tr '\n' ', ' | sed 's/,$//')
+            if [[ -n "$available" ]]; then
+                die "ERR: Label '$lbl' has no retention policy configured. Available labels: $available"
+            else
+                die "ERR: Label '$lbl' has no retention policy configured."
+            fi
+        fi
+    }
+
+    validate_label_p2p "$label" "$local_ds"
+
+    dry_flag=""
+    [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
+    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label (target: $TARGET_NODE)"
+    RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+    echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP"
 fi
 
 # --- HEARTBEAT MONITORING LOGIC ---
