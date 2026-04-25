@@ -309,6 +309,11 @@ zfsbud_core() {
     local snap_count=$(grep -c "send from" "$err_log" || echo 0)
     log_message "REPLICATION: Successfully sent $label_msg replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
 
+    # Mark the received snapshot as shipped on the remote side
+    if [[ -n "$remote_shell" ]]; then
+      $remote_shell -o ConnectTimeout="$ssh_t" "zfs set zep:shipped=true $remote_ds@$snap_name" 2>/dev/null || true
+    fi
+
     # Debug delay
     local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
     if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
