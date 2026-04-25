@@ -92,7 +92,8 @@ get_node_state() {
 
 cmd_status() {
     local raw_filesystem="$1"
-    
+    local configured_only="${2:-false}"
+
     if [[ -z "$raw_filesystem" ]]; then
         readarray -t filesystems < <(zfs list -H -o name | while read ds; do if zfs get -H -o value zep:chain "$ds" 2>/dev/null | grep -qv "^-$"; then echo "$ds"; fi; done)
         [[ ${#filesystems[@]} -eq 0 ]] && die "ERR: No filesystems with zep:chain found."
@@ -141,6 +142,7 @@ cmd_status() {
         while read -r line; do
             [[ -z "$line" ]] && continue
             IFS='|' read -r _ _ label _ age conf hb has_sb snap_count keep_val <<< "$line"
+            [[ "$configured_only" == "true" && "$conf" == "false" ]] && continue
             [[ -z "$snap_count" ]] && snap_count=0
             [[ -z "$keep_val" ]] && keep_val=0
 
@@ -329,6 +331,8 @@ cmd_status() {
                     [[ -z "$line" ]] && continue
                     # FILESYSTEM|ds|label|snap|age|conf|hb|has_sb|snap_count|keep_val|c_logic|ret_pct|ret_color
                     IFS='|' read -r _ ds_f label_f _ age_f conf_f hb_f has_sb_f snap_count keep_val c_logic ret_pct ret_color <<< "$line"
+
+                    [[ "$configured_only" == "true" && "$conf_f" == "false" ]] && continue
 
                     age_str=$(format_minutes "$age_f")
                     [[ -z "$snap_count" ]] && snap_count=0

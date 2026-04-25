@@ -120,6 +120,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --snap-list) VIRTUAL_SNAPS_INCOMING="$2"; shift 2 ;;
         --status) STATUS_MODE=true; shift ;;
+        --show-configured-only) STATUS_CONFIGURED_ONLY=true; shift ;;
         --config) 
             CONFIG_MODE=true
             shift
@@ -265,7 +266,7 @@ REPL_SNAP_PREFIX=$(get_snap_prefix "$filesystem")
 
 # Handle Status logic
 if [[ "$STATUS_MODE" == true ]]; then
-    cmd_status "$raw_filesystem"
+    cmd_status "$raw_filesystem" "$STATUS_CONFIGURED_ONLY"
     exit $?
 fi
 
