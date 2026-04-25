@@ -4,12 +4,17 @@
 get_node_state() {
     local alias="$1"
     local raw_ds="$2"
+    local node_role="$3"  # master, middle, or sink
     local fqdn=$(resolve_node_fqdn "$alias" "$raw_ds")
     local user=$(resolve_node_user "$alias" "$raw_ds")
     local ssh_t=$(resolve_ssh_timeout "$raw_ds")
 
     # The command to run on the node (local or remote)
+    local node_role_var="$node_role"
     local cmd='
+        # Role passed from caller
+        _node_role="'"$node_role_var"'"
+
         # 1. Zpools
         zpool list -H -o name,health,capacity 2>/dev/null | while read -r line; do
             echo "ZPOOL:$line"
@@ -35,20 +40,31 @@ get_node_state() {
                         is_configured="true"
                     fi
 
-                    latest=$(echo "$snap_list" | grep "@${prefix}${label}-" | head -n 1)
-                    if [[ -n "$latest" ]]; then
+                    snap_list=$(echo "$snap_list" | grep "@${prefix}${label}-" || true)
+                    snap_count=$(echo "$snap_list" | grep -c "@${prefix}${label}-" 2>/dev/null || echo 0)
+
+                    # Resolve keep value for this label
+                    keep_val=""
+                    # Prefer role-specific keep: zep:role:<_node_role>:keep:<label>
+                    [[ -n "$_node_role" ]] && keep_val=$(echo "$props" | grep "role:${_node_role}:keep:${label}" | head -n 1 | cut -f2)
+                    # Fallback: any role-based keep property
+                    [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=$(echo "$props" | grep "role:.*:keep:${label}" | head -n 1 | cut -f2)
+                    [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=0
+
+                    if [[ -n "$snap_list" ]]; then
+                        latest=$(echo "$snap_list" | head -n 1)
                         snap_name=$(echo "$latest" | awk "{print \$1}")
                         then=$(echo "$latest" | awk "{print \$2}")
                         # Calculate age in minutes
                         now=$(date +%s)
                         if [[ -n "$then" ]]; then
                             age=$(( (now - then) / 60 ))
-                            
+
                             # Check for split-brain error flag
                             has_sb=$(echo "$props" | grep ":error:split-brain" | cut -f2)
                             [[ "$has_sb" != "true" ]] && has_sb="false"
-                            
-                            echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat|$has_sb"
+
+                            echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat|$has_sb|$snap_count|$keep_val"
                         fi
                     fi
                 done
@@ -83,10 +99,18 @@ cmd_status() {
     IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
     
     local global_exit_code=0
+    local idx=0
 
     for n in "${nodes[@]}"; do
+        idx=$((idx + 1))
         node_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
-        out=$(get_node_state "$n" "$node_ds")
+
+        # Determine node role
+        local node_role="middle"
+        [[ $idx -eq 1 ]] && node_role="master"
+        [[ $idx -eq ${#nodes[@]} ]] && node_role="sink"
+
+        out=$(get_node_state "$n" "$node_ds" "$node_role")
         
         node_reachable=$?
         
@@ -97,8 +121,10 @@ cmd_status() {
         filesystems=""
         while read -r line; do
             [[ -z "$line" ]] && continue
-            IFS='|' read -r _ _ label _ age conf hb has_sb <<< "$line"
-            
+            IFS='|' read -r _ _ label _ age conf hb has_sb snap_count keep_val <<< "$line"
+            [[ -z "$snap_count" ]] && snap_count=0
+            [[ -z "$keep_val" ]] && keep_val=0
+
             # Heartbeat Logic
             if [[ -n "$hb" && "$hb" != "-" ]]; then
                 if [[ "$hb" =~ ^([0-9]+)m$ ]]; then hb="${BASH_REMATCH[1]}";
@@ -121,8 +147,18 @@ cmd_status() {
             
             # Split-Brain forces RED
             [[ "$has_sb" == "true" ]] && c_logic="RED"
-            
-            filesystems+="${line}|${c_logic}"$'\n'
+
+            # Retention percentage
+            ret_pct=0
+            if [[ "$keep_val" -gt 0 && "$snap_count" -gt 0 ]]; then
+                ret_pct=$(( snap_count * 100 / keep_val ))
+            fi
+            ret_color=$C_GREEN
+            [[ $ret_pct -lt 60 ]] && ret_color=$C_YELLOW
+            [[ $ret_pct -lt 30 ]] && ret_color=$C_RED
+            if [[ $ret_pct -ge 100 ]]; then ret_color=$C_GREEN; fi
+
+            filesystems+="${line}|${c_logic}|${ret_pct}|${ret_color}"$'\n'
         done <<< "$filesystems_raw"
 
         relevant_pools=$(echo "$filesystems" | cut -d'|' -f2 | cut -d'/' -f1 | sort -u)
@@ -248,15 +284,25 @@ cmd_status() {
                 echo -e "    ${c_ds}📁${C_RESET} ${ds_path#$p_name/}${sb_label}"
                 while read -r line; do
                     [[ -z "$line" ]] && continue
-                    IFS='|' read -r _ _ label _ age conf hb has_sb_line c_logic <<< "$line"
+                    # FILESYSTEM|ds|label|snap|age|conf|hb|has_sb|snap_count|keep_val|c_logic|ret_pct|ret_color
+                    IFS='|' read -r _ ds_f label_f _ age_f conf_f hb_f has_sb_f snap_count keep_val c_logic ret_pct ret_color <<< "$line"
 
-                    age_str=$(format_minutes "$age")
+                    age_str=$(format_minutes "$age_f")
+                    [[ -z "$snap_count" ]] && snap_count=0
+                    [[ -z "$keep_val" ]] && keep_val=0
                     label_desc=""
                     if [[ "$c_logic" == "YELLOW" ]]; then label_desc=" [late]"; fi
                     if [[ "$c_logic" == "RED" ]]; then label_desc=" [stale]"; fi
-                    
+
+                    ret_str=""
+                    if [[ "$ret_pct" -lt 100 && "$ret_pct" -gt 0 ]]; then
+                        ret_str=" ${ret_color}[retained ${ret_pct}%]${C_RESET}"
+                    elif [[ "$ret_pct" -eq 0 && "$keep_val" -gt 0 ]]; then
+                        ret_str=" ${C_RED}[retained 0%]${C_RESET}"
+                    fi
+
                     c_label=$C_GREEN; [[ "$c_logic" == "YELLOW" ]] && c_label=$C_YELLOW; [[ "$c_logic" == "RED" ]] && c_label=$C_RED
-                    [[ "$conf" == "false" ]] && echo -e "      - ${c_label}●${C_RESET} ${C_DIM}$label${C_RESET}: [${age_str}]${label_desc} ${C_RED}[unconfigured]${C_RESET}" || echo -e "      - ${c_label}●${C_RESET} $label: [${age_str}]${label_desc}"
+                    [[ "$conf_f" == "false" ]] && echo -e "      - ${c_label}●${C_RESET} ${C_DIM}${label_f}(${snap_count})${C_RESET}: [${age_str}]${label_desc} ${C_RED}[unconfigured]${C_RESET}${ret_str}" || echo -e "      - ${c_label}●${C_RESET} ${label_f}(${snap_count}): [${age_str}]${label_desc}${ret_str}"
                 done <<< "$ds_lines"
             done < <(echo "$filesystems" | grep -E "^FILESYSTEM\|${p_name}(\||/)" | cut -d'|' -f2 | sort -u)
         done
