@@ -225,7 +225,13 @@ zfsbud_core() {
 
     [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
     [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-    [[ "$REPL_FORCE" == "true" ]] && recv_args="-F $recv_args"
+
+    # Force flag: initial send always uses -F, incremental only if REPL_FORCE
+    if [[ "$is_initial" == "true" ]]; then
+      recv_args="-F $recv_args"
+    elif [[ "$REPL_FORCE" == "true" ]]; then
+      recv_args="-F $recv_args"
+    fi
 
     # Dry run handling
     if [[ "$dry_run" == true ]]; then
