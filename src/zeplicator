@@ -1241,7 +1241,12 @@ done
 exit_code=0
 if [[ "$REPLICATION_SUCCESS" == true ]]; then
     if [[ "$HAD_SPLIT_BRAIN" == true || "$REPLICATION_PARTIAL" == true ]]; then
-        exit_code=3
+        if [[ "$REPL_POLICY" == "resilience" ]]; then
+            exit_code=3
+        else
+            # If policy is fail, partial success is still considered a failure
+            [[ "$HAD_SPLIT_BRAIN" == true ]] && exit_code=2 || exit_code=1
+        fi
     fi
 elif [[ "$HAD_SPLIT_BRAIN" == true ]]; then
     exit_code=2
