@@ -30,18 +30,20 @@ declare -A ZEP_PROP_DEFAULTS=(
     ["zep:debug:send_delay"]="0"
 )
 
-# Populate the property cache for a dataset with a single zfs get call
+# Populate the property cache for a dataset
 cache_zfs_props() {
     local ds="$1"
     # Seed defaults first, then override with actual ZFS values
     for key in "${!ZEP_PROP_DEFAULTS[@]}"; do
         ZEP_PROP_CACHE["${ds}:${key}"]="${ZEP_PROP_DEFAULTS[$key]}"
     done
-    # Fetch all zep: properties from ZFS (overrides defaults where set)
+    # Fetch only zep: properties from ZFS (overrides defaults where set)
+    local zep_props="zep:snap_prefix,zep:ssh:timeout,zep:proc:timeout,zep:suspend,zep:zfs:force,zep:zfs:resume,zep:zfs:raw,zep:throttle,zep:mbuffer_size,zep:debug:send_delay,zep:chain"
     while IFS=$'\t' read -r prop val; do
+        [[ "$val" == "-" ]] && continue  # keep default for unset
         [[ "$prop" =~ :(shipped|alias|suspend)$ ]] && continue
         ZEP_PROP_CACHE["${ds}:${prop}"]="$val"
-    done < <(zfs get all -H -o property,value "$ds" 2>/dev/null)
+    done < <(zfs get -H -o property,value "$zep_props" "$ds" 2>/dev/null)
     # Extract chain and batch-fetch node-specific props in one call
     local chain="${ZEP_PROP_CACHE["${ds}:zep:chain"]:-}"
     if [[ -n "$chain" ]]; then
@@ -155,18 +157,22 @@ resolve_node_user() {
     [[ -z "$user" || "$user" == "-" ]] && echo "root" || echo "$user"
 }
 
-# Resolve SSH timeout (default 10s)
+# Resolve SSH timeout (default from ZEP_PROP_DEFAULTS: 30s)
 resolve_ssh_timeout() {
     local ds_raw=$1
-    local t=$(get_zfs_prop "zep:ssh:timeout" "$ds_raw")
-    [[ -z "$t" || "$t" == "-" ]] && echo "10" || echo "$t"
+    local t
+    t=$(get_zfs_prop "zep:ssh:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && t="${ZEP_PROP_DEFAULTS["zep:ssh:timeout"]}"
+    echo "$t"
 }
 
-# Resolve process timeout (default 3600s)
+# Resolve process timeout (default from ZEP_PROP_DEFAULTS: 60s)
 resolve_proc_timeout() {
     local ds_raw=$1
-    local t=$(get_zfs_prop "zep:proc:timeout" "$ds_raw")
-    [[ -z "$t" || "$t" == "-" ]] && echo "3600" || echo "$t"
+    local t
+    t=$(get_zfs_prop "zep:proc:timeout" "$ds_raw")
+    [[ -z "$t" || "$t" == "-" ]] && t="${ZEP_PROP_DEFAULTS["zep:proc:timeout"]}"
+    echo "$t"
 }
 
 # Resolve snapshot prefix (default: zep_)
