@@ -147,23 +147,6 @@ if [[ "$STATUS_MODE" != true ]]; then if [[ "$STATUS_MODE" != true && "$GET_STAT
 # Cache ZFS properties early — before any get_zfs_prop calls
 cache_zfs_props "$raw_filesystem"
 
-# Also cache properties for all downstream datasets (they exist locally on master)
-cache_chain_props() {
-    local ds="$1"
-    local chain="${ZEP_PROP_CACHE["${ds}:zep:chain"]:-}"
-    [[ -z "$chain" ]] && return
-    IFS=',' read -ra chain_arr <<< "$chain"
-    # Skip first node (it's the local one, already cached)
-    for (( i=1; i<${#chain_arr[@]}; i++ )); do
-        local n="${chain_arr[$i]}"
-        local n_fs="${ZEP_PROP_CACHE["${ds}:zep:node:${n}:fs"]:-}"
-        if [[ -n "$n_fs" && "$n_fs" != "-" ]]; then
-            cache_zfs_props "$n_fs"
-        fi
-    done
-}
-cache_chain_props "$raw_filesystem"
-
 # Early local filesystem resolution
 my_hostname=$(get_local_alias "$raw_filesystem" "$CLI_ALIAS")
 
