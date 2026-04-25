@@ -144,6 +144,26 @@ if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}
 
 if [[ "$STATUS_MODE" != true ]]; then if [[ "$STATUS_MODE" != true && "$GET_STATE_MODE" != true ]]; then [[ -n "$raw_filesystem" ]] || usage; fi; fi
 
+# Cache ZFS properties early — before any get_zfs_prop calls
+cache_zfs_props "$raw_filesystem"
+
+# Also cache properties for all downstream datasets (they exist locally on master)
+cache_chain_props() {
+    local ds="$1"
+    local chain="${ZEP_PROP_CACHE["${ds}:zep:chain"]:-}"
+    [[ -z "$chain" ]] && return
+    IFS=',' read -ra chain_arr <<< "$chain"
+    # Skip first node (it's the local one, already cached)
+    for (( i=1; i<${#chain_arr[@]}; i++ )); do
+        local n="${chain_arr[$i]}"
+        local n_fs="${ZEP_PROP_CACHE["${ds}:zep:node:${n}:fs"]:-}"
+        if [[ -n "$n_fs" && "$n_fs" != "-" ]]; then
+            cache_zfs_props "$n_fs"
+        fi
+    done
+}
+cache_chain_props "$raw_filesystem"
+
 # Early local filesystem resolution
 my_hostname=$(get_local_alias "$raw_filesystem" "$CLI_ALIAS")
 
@@ -184,8 +204,6 @@ filesystem=$local_ds # Ensure helper functions use the local path
 # Setup cleanup trap early
 trap cleanup EXIT
 
-# Optimization: Cache ZFS properties for the local dataset
-cache_zfs_prop "$filesystem" "$my_hostname"
 REPL_SNAP_PREFIX=$(get_snap_prefix "$filesystem")
 
 # Handle Status logic
@@ -335,7 +353,7 @@ handle_config() {
     done
 
     # Refresh cache before syncing to other nodes
-    cache_zfs_prop "$filesystem" "$my_hostname"
+    cache_zfs_props "$filesystem"
 
     # After all changes, sync to the entire chain if it's configured
     local current_chain=$(get_zfs_prop "zep:chain" "$filesystem")

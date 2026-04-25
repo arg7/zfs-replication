@@ -13,31 +13,72 @@ zpool() {
     command zpool "$@"
 }
 
+# Associative array for in-memory property caching (per-run)
+declare -A ZEP_PROP_CACHE
+
+# Default values for commonly-used properties (avoids roundtrips for unset props)
+declare -A ZEP_PROP_DEFAULTS=(
+    ["zep:snap_prefix"]="zep_"
+    ["zep:ssh:timeout"]="30"
+    ["zep:proc:timeout"]="60"
+    ["zep:suspend"]="false"
+    ["zep:zfs:force"]="false"
+    ["zep:zfs:resume"]="false"
+    ["zep:zfs:raw"]="false"
+    ["zep:throttle"]="-"
+    ["zep:mbuffer_size"]="1G"
+    ["zep:debug:send_delay"]="0"
+)
+
+# Populate the property cache for a dataset with a single zfs get call
+cache_zfs_props() {
+    local ds="$1"
+    # Seed defaults first, then override with actual ZFS values
+    for key in "${!ZEP_PROP_DEFAULTS[@]}"; do
+        ZEP_PROP_CACHE["${ds}:${key}"]="${ZEP_PROP_DEFAULTS[$key]}"
+    done
+    # Fetch all zep: properties from ZFS (overrides defaults where set)
+    while IFS=$'\t' read -r prop val; do
+        [[ "$prop" =~ :(shipped|alias|suspend)$ ]] && continue
+        ZEP_PROP_CACHE["${ds}:${prop}"]="$val"
+    done < <(zfs get all -H -o property,value "$ds" 2>/dev/null)
+    # Extract chain and batch-fetch node-specific props in one call
+    local chain="${ZEP_PROP_CACHE["${ds}:zep:chain"]:-}"
+    if [[ -n "$chain" ]]; then
+        IFS=',' read -ra chain_nodes <<< "$chain"
+        local node_props="zep:user"
+        for n in "${chain_nodes[@]}"; do
+            node_props+=",zep:node:${n}:user,zep:node:${n}:fqdn,zep:node:${n}:fs"
+        done
+        local vals
+        vals=$(zfs get -H -o value "$node_props" "$ds" 2>/dev/null)
+        local i=0
+        IFS=',' read -ra props_arr <<< "$node_props"
+        while IFS= read -r val; do
+            [[ -z "$val" ]] && val="-"
+            ZEP_PROP_CACHE["${ds}:${props_arr[$i]}"]="$val"
+            ((i++))
+        done <<< "$vals"
+    fi
+}
+
 get_zfs_prop() {
     local prop=$1
     local ds=$2
+    local key="${ds}:${prop}"
 
-    if [[ -n "$PROP_CACHE_FILE" && -f "$PROP_CACHE_FILE" ]]; then
-        local val=$(grep -w "^$prop" "$PROP_CACHE_FILE" | cut -f2 | head -n 1)
-        if [[ -n "$val" ]]; then
-            echo "$val"
-            return 0
-        fi
+    # Check in-memory cache first
+    if [[ -n "${ZEP_PROP_CACHE[$key]+x}" ]]; then
+        echo "${ZEP_PROP_CACHE[$key]}"
+        return 0
     fi
 
-    local val=$(zfs get -H -o value "$prop" "$ds" 2>/dev/null | head -n 1)
-    [[ -z "$val" ]] && echo "-" || echo "$val"
-}
-
-cache_zfs_prop() {
-    local ds="$1"
-    local node="$2"
-    local ds_safe="${ds//\//-}"
-    local prefix=$(get_snap_prefix "$ds")
-    PROP_CACHE_FILE="/tmp/${prefix}${node}-prop-cache-${ds_safe}-${$}.txt"
-    export PROP_CACHE_FILE
-    # Capture all zep: properties, excluding node-specific and transient state like 'shipped'
-    zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:" | grep -vE ":(shipped|alias|suspend)$" > "$PROP_CACHE_FILE" || true
+    # Cache miss — fetch from ZFS and cache result (including "-" for unset)
+    local val
+    val=$(zfs get -H -o value "$prop" "$ds" 2>/dev/null | head -n 1)
+    [[ -z "$val" ]] && val="-"
+    ZEP_PROP_CACHE["$key"]="$val"
+    echo "$val"
 }
 
 # Get the local node alias (using cli override, hostname in chain, fqdn match, or hostname as fallback)
@@ -238,9 +279,14 @@ resolve_node_filesystem() {
 get_repl_props_encoded() {
     local ds=$1
     local props=""
-    # Use cache if available for faster property gathering, ensuring we never propagate node-local state
-    if [[ -n "$PROP_CACHE_FILE" && -f "$PROP_CACHE_FILE" ]]; then
-        props=$(grep "^zep:" "$PROP_CACHE_FILE" | awk '{print $1"="$2}' | tr '\n' ';')
+    # Use in-memory cache if populated, otherwise query ZFS directly
+    if [[ ${#ZEP_PROP_CACHE[@]} -gt 0 ]]; then
+        for key in "${!ZEP_PROP_CACHE[@]}"; do
+            [[ "$key" == "${ds}:zep:"* ]] || continue
+            local prop="${key#${ds}:}"
+            [[ "$prop" =~ :(shipped|alias|suspend)$ ]] && continue
+            props+="${prop}=${ZEP_PROP_CACHE[$key]};"
+        done
     else
         props=$(zfs get all -H -o property,value "$ds" | grep "^zep:" | grep -vE ":(shipped|alias|suspend)$" | awk '{print $1"="$2}' | tr '\n' ';')
     fi
@@ -251,13 +297,15 @@ apply_repl_props() {
     local ds=$1
     local encoded=$2
     [[ -z "$encoded" ]] && return
-    
+
     echo -e "${CHAIN_PREFIX}  ${C_DIM}⚙️${C_RESET}  Syncing replication properties for $ds..."
     local decoded=$(echo -n "$encoded" | base64 -d)
     IFS=';' read -ra props <<< "$decoded"
     for p in "${props[@]}"; do
         if [[ -n "$p" ]]; then
             local prop_key="${p%%=*}"
+            # Skip ZFS readonly properties
+            [[ "$prop_key" =~ ^(guid|used|available|referenced|compressratio|logicalused|usedbysnapshots|usedbydataset|usedbyrefreservation|usedbychildren|creation|written|logicalreferenced|volblocksize|refreservation|refquota|quota)$ ]] && continue
             local current_val=$(get_zfs_prop "$prop_key" "$ds")
             local new_val="${p#*=}"
             if [[ "$current_val" != "$new_val" ]]; then
@@ -351,7 +399,6 @@ die() {
 
 cleanup() {
     [[ -n "$LOCKFILE" ]] && rm -f "$LOCKFILE" "${LOCKFILE}.cnt"
-    [[ -n "$PROP_CACHE_FILE" ]] && rm -f "$PROP_CACHE_FILE"
 }
 
 check_stuck_job() {

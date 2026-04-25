@@ -8,20 +8,19 @@ resolve_retention() {
     local lbl=$2
     local fallback=$3
     local role="middle"
-    
+
     [[ $ME_INDEX -eq 0 ]] && role="master"
     [[ $ME_INDEX -eq $((${#nodes[@]} - 1)) ]] && role="sink"
-    
+
+    # Single batched zfs get to resolve all candidates at once
+    local vals=$(zfs get -H -o value "zep:node:${ME}:keep:${lbl},zep:role:${role}:keep:${lbl}" "$ds" 2>/dev/null)
+    local node_val=$(echo "$vals" | head -n 1)
+    local role_val=$(echo "$vals" | tail -n 1)
+
     local val=""
-    
-    # 1. Host-specific: zep:node:${ME}:keep:${lbl}
-    val=$(get_zfs_prop "zep:node:${ME}:keep:${lbl}" "$ds")
-
-    # 2. Role-specific: zep:role:<role>:keep:<label>
-    [[ -z "$val" || "$val" == "-" ]] && val=$(get_zfs_prop "zep:role:${role}:keep:${lbl}" "$ds")
-
-    # 3. Final Fallback
-    [[ -z "$val" || "$val" == "-" ]] && val="$fallback"
+    [[ -n "$node_val" && "$node_val" != "-" ]] && val="$node_val"
+    [[ -z "$val" && -n "$role_val" && "$role_val" != "-" ]] && val="$role_val"
+    [[ -z "$val" ]] && val="$fallback"
 
     # Ensure val is a number, otherwise default to a safe high number like 1000 or the fallback if numeric
     if [[ ! "$val" =~ ^[0-9]+$ ]]; then
@@ -29,7 +28,7 @@ resolve_retention() {
     fi
 
     echo "$val"
-    }
+}
 
     purge_shipped_snapshots() {
     local ds=$1
@@ -50,27 +49,13 @@ resolve_retention() {
     if [[ "$DRY_RUN" == true ]]; then
         # Inject virtual snapshots to simulate accurate count
         if [[ -n "$VIRTUAL_SNAP_CREATED" && "$VIRTUAL_SNAP_CREATED" == *"$lbl"* ]]; then
-            local v_name="${ds}@${VIRTUAL_SNAP_CREATED}"
-            local already_exists=false
-            for s in "${snaps[@]}"; do [[ "$s" == "$v_name"* ]] && already_exists=true && break; done
-            
-            if [[ "$already_exists" == false ]]; then
-                snaps=("$v_name	true" "${snaps[@]}")
-            fi
+            snaps=("${ds}@${VIRTUAL_SNAP_CREATED}	true" "${snaps[@]}")
         fi
-        
+
         if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
             IFS=',' read -ra v_incoming <<< "$VIRTUAL_SNAPS_INCOMING"
             for v in "${v_incoming[@]}"; do
-                if [[ "$v" == *"$lbl"* ]]; then
-                   local v_name="${ds}@${v}"
-                   local already_exists=false
-                   for s in "${snaps[@]}"; do [[ "$s" == "$v_name"* ]] && already_exists=true && break; done
-                   
-                   if [[ "$already_exists" == false ]]; then
-                       snaps=("$v_name	true" "${snaps[@]}")
-                   fi
-                fi
+                [[ "$v" == *"$lbl"* ]] && snaps=("${ds}@${v}	true" "${snaps[@]}")
             done
         fi
     fi
@@ -80,22 +65,20 @@ resolve_retention() {
         echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Snapshot count ($count) is within limit ($k_count). Skipping purge."
         return
     fi
-    
+
+    # Check if any snapshot in the KEEP range has shipped — if so, older unshipped snaps are safe to remove
+    local newer_shipped=false
+    for (( i=0; i<k_count; i++ )); do
+        [[ "${snaps[i]}" == *"true"* ]] && { newer_shipped=true; break; }
+    done
+
     local purged_count=0
     # Process snapshots from index k_count (0-indexed)
     for (( i=k_count; i<count; i++ )); do
         local line="${snaps[i]}"
         read -r snap_name shipped_val <<< "$line"
-        
-        # Check if shipped
-        local is_shipped=false
-        if [[ "$line" == *"zep:shipped"* ]]; then
-            is_shipped=true
-        elif [[ -n "$shipped_val" && "$shipped_val" != "-" ]]; then
-            is_shipped=true
-        fi
 
-        if [[ "$is_shipped" == true ]]; then
+        if [[ "$shipped_val" == "true" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
                 echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  [DRY RUN] Would purge old shipped snapshot: $snap_name"
             else
@@ -103,6 +86,10 @@ resolve_retention() {
                 zfs destroy "$snap_name"
                 purged_count=$((purged_count + 1))
             fi
+        elif [[ "$newer_shipped" == true ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  Purging old unshipped snapshot (newer shipped exists): $snap_name"
+            zfs destroy "$snap_name"
+            purged_count=$((purged_count + 1))
         else
             echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
         fi
