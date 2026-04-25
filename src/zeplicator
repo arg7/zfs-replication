@@ -951,8 +951,7 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
         VIRTUAL_SNAP_CREATED="$snap_name_base"
     elif zfs list -t snap "$snap_name" >/dev/null 2>&1; then
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Snapshot $snap_name already exists. Skipping..."
-        exit 0
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Snapshot $snap_name already exists. Proceeding with replication for existing snapshot (DEBUG)..."
     else
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name"
         zfs snapshot "$snap_name" 2>&1 | indent_output
@@ -991,8 +990,8 @@ if [[ -z "$LATEST_SNAP" && ( "$CASCADED" == true || "$IS_DONOR" == true ) ]]; th
 fi
 
 # 2. Replication & Audit
-# 2. Replication & Audit
 REPLICATION_SUCCESS=false
+REPLICATION_PARTIAL=false
 HAD_SPLIT_BRAIN=false
 hop_idx=0
 while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
@@ -1008,6 +1007,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
     if [[ $? -eq 255 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Node $hop_node is unreachable (Pre-flight). Skipping due to policy=resilience..."
+            REPLICATION_PARTIAL=true
             continue
         else
             die "Node $hop_node is unreachable (Pre-flight). Aborting due to policy=fail."
@@ -1061,6 +1061,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 die "Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2
             fi
             echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
+            REPLICATION_PARTIAL=true
             [[ -n "$SPLIT_BRAIN_HINT" && "$CASCADED" == true ]] && echo "HINT_EXPORT:$SPLIT_BRAIN_HINT"
             TRANSFER_DONE=false
             continue
@@ -1074,6 +1075,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
             fi
             echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
+            REPLICATION_PARTIAL=true
             TRANSFER_DONE=false
             continue
         else
@@ -1187,6 +1189,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 echo "$DOWNSTREAM_OUT" | grep -v "^SENT_LIST:"
                 if [[ "$REPL_POLICY" == "resilience" ]]; then
                     echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
+                    REPLICATION_PARTIAL=true
                     # SKIP all nodes that were supposed to be handled by this hop
                     break 
                 else
@@ -1207,9 +1210,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                     CASCADE_VERIFIED=true
                 else
                     echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Verification FAILED. Snapshot $LATEST_SNAP not confirmed at end of chain, but transfer to $hop_node succeeded."
+                    REPLICATION_PARTIAL=true
                 fi
             else
                 echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
+                REPLICATION_PARTIAL=true
             fi
         else
             # If donor run or dry run, we consider the local transfer as enough for "success" of this hop
@@ -1224,15 +1229,21 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         else
             echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Continuing to next hop in chain due to policy=resilience..."
             REPLICATION_SUCCESS=true # We still count the local transfer as a partial success for shipped marking
+            REPLICATION_PARTIAL=true
         fi
     else
         echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Replication to $hop_node failed. Skipping to next available node in chain..."
+        REPLICATION_PARTIAL=true
     fi
 done
 
 # 3. Final State Reporting & Marking
 exit_code=0
-if [[ "$HAD_SPLIT_BRAIN" == true ]]; then
+if [[ "$REPLICATION_SUCCESS" == true ]]; then
+    if [[ "$HAD_SPLIT_BRAIN" == true || "$REPLICATION_PARTIAL" == true ]]; then
+        exit_code=3
+    fi
+elif [[ "$HAD_SPLIT_BRAIN" == true ]]; then
     exit_code=2
 elif [[ "$REPLICATION_SUCCESS" == false && ${#NODES_REMAINING[@]} -gt 0 ]]; then
     exit_code=1
