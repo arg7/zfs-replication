@@ -46,6 +46,7 @@ Advanced Flags:
   --mark-only       Only perform rotation/cleanup of already shipped snapshots.
   --destroy-chain   Force a fresh start when promoting if no common ground exists.
   --snap <name>     Specify a literal snapshot name to use for promotion/rollback.
+  --apply-props <b> Apply encoded replication properties and exit (internal).
   --target <node>   Point-to-point transfer to a specific node (ignores chain).
   --donor           Run as a donor peer to heal a downstream node.
   -y                Assume 'yes' for destructive operations (promotion/rollback).
@@ -74,6 +75,7 @@ EOF
 MARK_ONLY=false
 initial_send=false
 PROMOTE=false
+APPLY_PROPS=""
 CASCADED=false
 SUSPEND=false
 RESUME=false
@@ -111,13 +113,13 @@ while [[ $# -gt 0 ]]; do
         --destroy-chain) DESTROY_CHAIN=true; shift ;;
         -y) YES=true; shift ;;
         --snap) PROMOTE_SNAP="$2"; shift 2 ;;
+        --apply-props) APPLY_PROPS="$2"; shift 2 ;;
         --sync-props) sync_props_data="$2"; shift 2 ;;
         --target) TARGET_NODE="$2"; shift 2 ;;
         --donor) IS_DONOR=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --snap-list) VIRTUAL_SNAPS_INCOMING="$2"; shift 2 ;;
         --status) STATUS_MODE=true; shift ;;
-        --get-state) GET_STATE_MODE=true; shift ;;
         --config) 
             CONFIG_MODE=true
             shift
@@ -142,7 +144,7 @@ if [[ ${#positional_args[@]} -gt 0 ]]; then raw_filesystem="${positional_args[0]
 if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
 if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
 
-if [[ "$STATUS_MODE" != true ]]; then if [[ "$STATUS_MODE" != true && "$GET_STATE_MODE" != true ]]; then [[ -n "$raw_filesystem" ]] || usage; fi; fi
+if [[ "$STATUS_MODE" != true ]]; then [[ -n "$raw_filesystem" ]] || usage; fi
 
 # Cache ZFS properties early — before any get_zfs_prop calls
 cache_zfs_props "$raw_filesystem"
@@ -168,7 +170,6 @@ else
     else
         # Last resort fallback: use the provided name directly
         local_ds="$raw_filesystem"
-        REPL_CHAIN=$(get_zfs_prop "zep:chain" "$raw_filesystem")
     fi
 fi
 
@@ -393,6 +394,12 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
     exit 0
 fi
 
+# Handle --apply-props (used by promotion to propagate chain config)
+if [[ -n "$APPLY_PROPS" ]]; then
+    apply_repl_props "$local_ds" "$APPLY_PROPS" >/dev/null 2>&1
+    exit 0
+fi
+
 # Handle Promotion logic
 if [[ "$PROMOTE" == true ]]; then
     echo "  🚀 Promoting $my_hostname to Master..."
@@ -529,36 +536,77 @@ if [[ "$PROMOTE" == true ]]; then
             
             echo "  ✨ Updating local chain configuration..."
             zfs set zep:chain="$NEW_CHAIN" "$local_ds"
+            REPL_CHAIN="$NEW_CHAIN"
             send_smtp_alert "info" "NOTICE: Node $my_hostname has been PROMOTED to Master for filesystem $raw_filesystem. New chain: $NEW_CHAIN"
+            # Refresh cache so prop encoding picks up the new chain
+            cache_zfs_props "$local_ds"
 
-            if sync_chain_props "$local_ds" "NEW_NODES"; then
+            # Propagate the new chain to all downstream nodes in order
+            _props_encoded=$(get_repl_props_encoded "$local_ds")
+            echo "  🔄 Propagating new chain configuration to downstream nodes..."
+            _unreachable_count=0
+            for _n in "${NEW_NODES[@]}"; do
+                [[ "$_n" == "$my_hostname" ]] && continue
+                _n_fqdn=$(resolve_node_fqdn "$_n" "$raw_filesystem")
+                _n_user=$(resolve_node_user "$_n" "$raw_filesystem")
+                _n_ds=$(resolve_node_filesystem "$_n" "$raw_filesystem")
+                echo -n "    - $_n ($_n_fqdn)... "
+                _ssh_rc=0
+                ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
+                    "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
+                if [[ $_ssh_rc -eq 0 ]]; then
+                    echo "✅"
+                else
+                    echo "❌"
+                    _unreachable_count=$((_unreachable_count + 1))
+                fi
+            done
+
+            if [[ $_unreachable_count -eq 0 ]]; then
                 echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
             else
-                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable during property sync."
+                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but $_unreachable_count node(s) were unreachable during prop sync."
                 echo "     Replication will attempt to heal them during the next cycle."
+            fi
+            exit 0
+        else
+            # --promote --destroy-chain (no --auto or --snap): set new chain without rollback
+            echo "  ✨ Setting new chain configuration without rollback..."
+            zfs set zep:chain="$NEW_CHAIN" "$local_ds"
+            REPL_CHAIN="$NEW_CHAIN"
+            cache_zfs_props "$local_ds"
+
+            _props_encoded=$(get_repl_props_encoded "$local_ds")
+            _unreachable_count=0
+            for _n in "${NEW_NODES[@]}"; do
+                [[ "$_n" == "$my_hostname" ]] && continue
+                _n_fqdn=$(resolve_node_fqdn "$_n" "$raw_filesystem")
+                _n_user=$(resolve_node_user "$_n" "$raw_filesystem")
+                _n_ds=$(resolve_node_filesystem "$_n" "$raw_filesystem")
+                echo -n "    - $_n ($_n_fqdn)... "
+                _ssh_rc=0
+                ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
+                    "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
+                if [[ $_ssh_rc -eq 0 ]]; then
+                    echo "✅"
+                else
+                    echo "❌"
+                    _unreachable_count=$((_unreachable_count + 1))
+                fi
+            done
+
+            if [[ $_unreachable_count -eq 0 ]]; then
+                echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+            else
+                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but $_unreachable_count node(s) unreachable."
             fi
             exit 0
         fi
     fi
-    # If we are here and PROMOTE=true, it means no auto/snap/rollback was requested,
-    # but we should still sync the new chain configuration and exit.
-    if [[ "$PROMOTE" == true ]]; then
-        echo "  ✨ Updating local chain configuration..."
-        zfs set zep:chain="$NEW_CHAIN" "$local_ds"
-        send_smtp_alert "info" "NOTICE: Node $my_hostname has been PROMOTED to Master for filesystem $raw_filesystem. New chain: $NEW_CHAIN"
-
-        if sync_chain_props "$local_ds" "NEW_NODES"; then
-            echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
-        else
-            echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but some nodes were unreachable during property sync."
-            echo "     Replication will attempt to heal them during the next cycle."
-        fi
-        exit 0
-    fi
-fi 
+fi
 
 # Apply propagated properties
-if [[ -n "$sync_props_data" && "$PROMOTE" != true ]]; then
+if [[ -n "$sync_props_data" ]]; then
     if zfs list "$local_ds" >/dev/null 2>&1; then
         apply_repl_props "$local_ds" "$sync_props_data"
     else
@@ -890,7 +938,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
             if [[ "$ZEP_BW" == "true" ]]; then casc_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then casc_opts+=" --force-color"; fi
-            
+
             PROPS_ARG=""
             if [[ "$initial_send" == true ]]; then
                 PROPS_ARG="--sync-props $(get_repl_props_encoded "$local_ds")"

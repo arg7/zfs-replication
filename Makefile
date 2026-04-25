@@ -42,6 +42,7 @@ $(OUTPUT): $(LIBS) $(MAIN) | $(BUILD_DIR)
 	@grep -v "^#!" $(MAIN) | grep -v "^source " >> $@
 	@echo "# --- END zeplicator orchestrator ---" >> $@
 	@chmod +x $@
+	@bash -n $@
 	@echo "Done! Generated $@"
 	@echo "Artifacts available in $(BUILD_DIR)/"
 
