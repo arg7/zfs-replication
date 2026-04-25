@@ -977,37 +977,13 @@ elif [[ "$REPLICATION_SUCCESS" == false && ${#NODES_REMAINING[@]} -gt 0 ]]; then
     exit_code=1
 fi
 
-mark_shipped_from_log() {
-    local ds="$1"
-    local err_log="/tmp/${REPL_SNAP_PREFIX}${my_hostname}-replication.err"
-    local shipped_snaps=()
-    if [[ -f "$err_log" ]]; then
-        while IFS= read -r line; do
-            local snap=$(echo "$line" | grep -oP 'to\s+\S+?@(\S+)' | sed 's/to .*@//')
-            [[ -n "$snap" ]] && shipped_snaps+=("$snap")
-        done < <(grep "^send from" "$err_log")
-    fi
-
-    if [[ ${#shipped_snaps[@]} -gt 0 ]]; then
-        for s in "${shipped_snaps[@]}"; do
-            zfs set zep:shipped=true "$ds@$s"
-        done
-        echo "${shipped_snaps[*]}"
-    fi
-}
-
 if [[ "$REPLICATION_SUCCESS" == true ]]; then
-    if [[ "$IS_MASTER" == true && "$CASCADED" == false ]]; then
+    if [[ "$IS_MASTER" == true && "$CASCADED" == false && -n "$LATEST_SNAP" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            echo "${CHAIN_PREFIX}  🏷️  [DRY RUN] Would mark local snapshots ($local_ds) as shipped..."
+            echo "${CHAIN_PREFIX}  🏷️  [DRY RUN] Would mark $LATEST_SNAP as shipped..."
         else
-            local shipped_list
-            shipped_list=$(mark_shipped_from_log "$local_ds")
-            if [[ -n "$shipped_list" ]]; then
-                echo "${CHAIN_PREFIX}  🏷️  Marking sent snapshots ($local_ds) as shipped: $shipped_list"
-            else
-                echo "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  No sent snapshots found in err_log, skipping shipped marking${C_RESET}"
-            fi
+            echo "${CHAIN_PREFIX}  🏷️  Marking sent snapshot $LATEST_SNAP as shipped."
+            zfs set zep:shipped=true "$local_ds@$LATEST_SNAP"
         fi
     fi
     purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
