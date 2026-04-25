@@ -34,8 +34,7 @@ get_node_state() {
                 [[ -z "$prefix" || "$prefix" == "-" ]] && prefix="zep_"
                 
                 snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
-                labels=$(echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u)
-                for label in $labels; do
+                echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u | while read -r label; do
                     [[ -z "$label" ]] && continue
                     
                     # Get configured status and heartbeat
@@ -45,8 +44,8 @@ get_node_state() {
                         is_configured="true"
                     fi
 
-                    snap_list=$(echo "$snap_list" | grep "@${prefix}${label}-" || true)
-                    snap_count=$(echo "$snap_list" | grep -c "@${prefix}${label}-" 2>/dev/null || echo 0)
+                    label_snaps=$(echo "$snap_list" | grep "@${prefix}${label}-" || true)
+                    snap_count=$(echo "$label_snaps" | grep -c "@${prefix}${label}-" 2>/dev/null || echo 0)
 
                     # Resolve keep value for this label
                     keep_val=""
@@ -56,8 +55,8 @@ get_node_state() {
                     [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=$(echo "$props" | grep "role:.*:keep:${label}" | head -n 1 | cut -f2)
                     [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=0
 
-                    if [[ -n "$snap_list" ]]; then
-                        latest=$(echo "$snap_list" | head -n 1)
+                    if [[ -n "$label_snaps" ]]; then
+                        latest=$(echo "$label_snaps" | head -n 1)
                         snap_name=$(echo "$latest" | awk "{print \$1}")
                         then=$(echo "$latest" | awk "{print \$2}")
                         # Calculate age in minutes
@@ -200,7 +199,7 @@ cmd_status() {
             if [[ "$cap" -ge 40 ]]; then pool_has_full="true"; fi
             
             # Bubble split-brain to pool
-            if echo "$filesystems" | grep -E "^FILESYSTEM|$p_name(\||/)" | grep -q "|true|RED$"; then
+            if echo "$filesystems" | grep -E "^FILESYSTEM\|$p_name(\||/)" | cut -d'|' -f8 | grep -q "^true$"; then
                 pool_max_status="RED"
                 pool_has_sb="true"
             fi
@@ -314,7 +313,7 @@ cmd_status() {
                 
                 # Evaluate dataset-level split-brain and status
                 has_sb_ds="false"
-                if echo "$ds_lines" | grep -q "|true|RED$"; then has_sb_ds="true"; fi
+                if echo "$ds_lines" | cut -d'|' -f8 | grep -q "^true$"; then has_sb_ds="true"; fi
                 
                 ds_status="GREEN"
                 [[ "$ds_lines" =~ \|RED$'\n' ]] && ds_status="RED"
