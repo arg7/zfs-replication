@@ -131,7 +131,7 @@ while [[ $# -gt 0 ]]; do
                 esac
             done
             ;;
-        -*) echo "Unknown flag: $1"; shift ;; # Ignore unknown flags
+        -*) echo "❌ ERROR: Unknown flag: $1" >&2; echo "Run '$(basename "$0") --help' for usage." >&2; exit 1 ;;
         *) positional_args+=("$1"); shift ;; # Collect positional arguments
     esac
 done
@@ -144,7 +144,80 @@ if [[ ${#positional_args[@]} -gt 0 ]]; then raw_filesystem="${positional_args[0]
 if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
 if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
 
-if [[ "$STATUS_MODE" != true ]]; then [[ -n "$raw_filesystem" ]] || usage; fi
+# --- Pre-flight argument validation ---
+validate_args() {
+    local errors=()
+
+    # 0. Flag dependency checks (before anything else)
+    if [[ "$DESTROY_CHAIN" == true && "$PROMOTE" != true ]]; then
+        errors+=("ERR: --destroy-chain requires --promote")
+    fi
+    if [[ -n "$PROMOTE_SNAP" && "$PROMOTE" != true ]]; then
+        errors+=("ERR: --snap requires --promote")
+    fi
+    if [[ "$SUSPEND" == true && "$RESUME" == true ]]; then
+        errors+=("ERR: --suspend and --resume are mutually exclusive")
+    fi
+    if [[ "$initial_send" == true && "$PROMOTE" == true ]]; then
+        errors+=("ERR: --init and --promote are mutually exclusive")
+    fi
+    if [[ "$PROMOTE" == true && "$AUTO" != true && -z "$PROMOTE_SNAP" && "$DESTROY_CHAIN" != true ]]; then
+        errors+=("ERR: --promote requires one of: --auto, --snap <name>, or --destroy-chain")
+    fi
+
+    # 1. Filesystem required (except for status/config/help)
+    if [[ "$STATUS_MODE" != true && "$CONFIG_MODE" != true ]]; then
+        if [[ -z "$raw_filesystem" ]]; then
+            # Only show usage if there are no other errors
+            if [[ ${#errors[@]} -eq 0 ]]; then
+                usage
+            fi
+        fi
+    fi
+
+    # 2. Filesystem must exist as a ZFS dataset
+    if [[ -n "$raw_filesystem" ]]; then
+        if ! zfs list "$raw_filesystem" >/dev/null 2>&1; then
+            errors+=("ERR: Filesystem '$raw_filesystem' does not exist or is not a valid ZFS dataset")
+        fi
+    fi
+
+    # 2. If --alias is provided, it must be a valid node in the chain
+    if [[ -n "$CLI_ALIAS" && -n "$raw_filesystem" ]]; then
+        local chain=$(zfs get -H -o value zep:chain "$raw_filesystem" 2>/dev/null)
+        if [[ -n "$chain" && "$chain" != "-" ]]; then
+            local found=false
+            IFS=',' read -ra chain_nodes <<< "$chain"
+            for n in "${chain_nodes[@]}"; do
+                [[ "$n" == "$CLI_ALIAS" ]] && found=true && break
+            done
+            if [[ "$found" != true ]]; then
+                errors+=("ERR: Alias '$CLI_ALIAS' is not a member of chain '$chain'. Valid nodes: $(IFS=,; echo "${chain_nodes[*]}")")
+            fi
+        fi
+    fi
+
+    # 4. --auto with --promote requires a valid chain
+    if [[ "$PROMOTE" == true && "$AUTO" == true && -n "$raw_filesystem" ]]; then
+        local chain=$(zfs get -H -o value zep:chain "$raw_filesystem" 2>/dev/null)
+        if [[ -z "$chain" || "$chain" == "-" ]]; then
+            errors+=("ERR: Cannot promote — no zep:chain configured on '$raw_filesystem'")
+        fi
+    fi
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        echo -e "${C_RED}❌ ERROR:${C_RESET} Invalid arguments:"
+        for err in "${errors[@]}"; do
+            echo "  - $err"
+        done
+        echo ""
+        echo -e "${C_BOLD}Run '$(basename "$0") --help' for usage information.${C_RESET}"
+        exit 1
+    fi
+}
+
+validate_args
+# --- End pre-flight validation ---
 
 # Cache ZFS properties early — before any get_zfs_prop calls
 cache_zfs_props "$raw_filesystem"
@@ -434,6 +507,23 @@ if [[ "$PROMOTE" == true ]]; then
                 local_ds_target=$(resolve_node_filesystem "$n" "$raw_filesystem")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
                 local_user=$(resolve_node_user "$n" "$raw_filesystem")
+
+                # Validate node configuration before attempting verification
+                if [[ "$local_fqdn" == "-" || -z "$local_fqdn" ]]; then
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
+                    echo ""
+                    echo "      ⚠️  WARNING: No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
+                    continue
+                fi
+                if [[ "$local_ds_target" == "-" || -z "$local_ds_target" ]]; then
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
+                    echo ""
+                    echo "      ⚠️  WARNING: No filesystem configured for node '$n'. Set zep:node:${n}:fs"
+                    continue
+                fi
+
                 g=$(ssh "${local_user}@${local_fqdn}" "zfs get -H -o value guid ${local_ds_target}@$TARGET_SNAP" 2>/dev/null)
                 if [[ -n "$g" && "$g" != "-" ]]; then
                     echo "✅"
@@ -448,12 +538,27 @@ if [[ "$PROMOTE" == true ]]; then
             echo "  🔍 Auto-discovering latest common snapshot..."
             tmp_common="/tmp/${REPL_SNAP_PREFIX}${my_hostname}-common-snaps.$$"
             f_node_flag=true
-            
+
             for n in "${NEW_NODES[@]}"; do
                 echo -n "    - Querying $n... "
                 local_ds_target=$(resolve_node_filesystem "$n" "$raw_filesystem")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
                 local_user=$(resolve_node_user "$n" "$raw_filesystem")
+
+                # Validate node configuration before attempting query
+                if [[ "$local_fqdn" == "-" || -z "$local_fqdn" ]]; then
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
+                    echo "      ⚠️  WARNING: No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
+                    continue
+                fi
+                if [[ "$local_ds_target" == "-" || -z "$local_ds_target" ]]; then
+                    echo "❌"
+                    UNREACHABLE_NODES+=("$n")
+                    echo "      ⚠️  WARNING: No filesystem configured for node '$n'. Set zep:node:${n}:fs"
+                    continue
+                fi
+
                 node_target="${local_user}@${local_fqdn}"
 
                 node_tmp="/tmp/${REPL_SNAP_PREFIX}${my_hostname}-node-snaps.$$"
@@ -550,6 +655,21 @@ if [[ "$PROMOTE" == true ]]; then
                 _n_fqdn=$(resolve_node_fqdn "$_n" "$raw_filesystem")
                 _n_user=$(resolve_node_user "$_n" "$raw_filesystem")
                 _n_ds=$(resolve_node_filesystem "$_n" "$raw_filesystem")
+
+                # Validate node configuration before attempting propagation
+                if [[ "$_n_fqdn" == "-" || -z "$_n_fqdn" ]]; then
+                    echo "❌"
+                    echo "      ⚠️  WARNING: No FQDN configured for node '$_n'. Skipping."
+                    _unreachable_count=$((_unreachable_count + 1))
+                    continue
+                fi
+                if [[ "$_n_ds" == "-" || -z "$_n_ds" ]]; then
+                    echo "❌"
+                    echo "      ⚠️  WARNING: No filesystem configured for node '$_n'. Skipping."
+                    _unreachable_count=$((_unreachable_count + 1))
+                    continue
+                fi
+
                 echo -n "    - $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
@@ -583,6 +703,21 @@ if [[ "$PROMOTE" == true ]]; then
                 _n_fqdn=$(resolve_node_fqdn "$_n" "$raw_filesystem")
                 _n_user=$(resolve_node_user "$_n" "$raw_filesystem")
                 _n_ds=$(resolve_node_filesystem "$_n" "$raw_filesystem")
+
+                # Validate node configuration before attempting propagation
+                if [[ "$_n_fqdn" == "-" || -z "$_n_fqdn" ]]; then
+                    echo "❌"
+                    echo "      ⚠️  WARNING: No FQDN configured for node '$_n'. Skipping."
+                    _unreachable_count=$((_unreachable_count + 1))
+                    continue
+                fi
+                if [[ "$_n_ds" == "-" || -z "$_n_ds" ]]; then
+                    echo "❌"
+                    echo "      ⚠️  WARNING: No filesystem configured for node '$_n'. Skipping."
+                    _unreachable_count=$((_unreachable_count + 1))
+                    continue
+                fi
+
                 echo -n "    - $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
