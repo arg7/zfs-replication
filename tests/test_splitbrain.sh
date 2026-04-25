@@ -86,6 +86,8 @@ ensure_chain
 rollback_node 2; rollback_node 3
 echo "  Chain: node1 → node2 → node3"
 
+zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
+
 rc=0
 set +e
 $ZEP --alias node1 zep-node-1/test-1 min1 >/tmp/zep.log 2>&1
@@ -99,9 +101,6 @@ echo "=== Phase 2: Split-brain on node2 ==="
 
 write_error 2
 echo "  Divergent data written to node2"
-
-echo sleep 1 minute
-sleep 60
 
 rc=0
 set +e
@@ -119,16 +118,13 @@ echo "=== Phase 3: Resilience mode ==="
 zfs set zep:policy=resilience zep-node-1/test-1 2>/dev/null
 echo "  policy=resilience set on node1 (master)"
 
-echo sleep 1 minute
-sleep 60
-
 rc=0
 set +e
 $ZEP --alias node1 zep-node-1/test-1 min1 -bw >/tmp/zep.log 2>&1
 rc=$?
 set -e
 
-assert_exit_code "Replication with resilience, split-brain on node2" 0 "$rc"
+assert_exit_code "Replication with resilience, split-brain on node2" 3 "$rc"
 
 # --- Phase 4: Rollback node2, verify recovery ---
 echo ""
@@ -138,10 +134,6 @@ zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
 rollback_node 2
 
 assert_flag "Split-brain flag after rollback on node2" 2 "true"
-
-
-echo sleep 1 minute
-sleep 60
 
 rc=0
 set +e
@@ -161,9 +153,6 @@ echo "=== Phase 5: Split-brain on node3 ==="
 write_error 3
 echo "  Divergent data written to node3"
 
-echo sleep 1 minute
-sleep 60
-
 rc=0
 set +e
 $ZEP --alias node1 zep-node-1/test-1 min1 -bw >/tmp/zep.log 2>&1
@@ -178,10 +167,6 @@ echo ""
 echo "=== Phase 6: Resilience mode with node3 ==="
 
 zfs set zep:policy=resilience zep-node-1/test-1 2>/dev/null
-
-
-echo sleep 1 minute
-sleep 60
 
 rc=0
 set +e
@@ -199,9 +184,6 @@ zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
 rollback_node 3
 
 assert_flag "Split-brain flag after rollback on node3" 3 "true"
-
-echo sleep 1 minute
-sleep 60
 
 rc=0
 set +e
