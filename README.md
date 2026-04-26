@@ -148,7 +148,7 @@ Features:
 - **Retention Tracking**: Snapshot count shown per label (e.g., `min1(15)`) with a color-coded retained percentage warning when below 100% (e.g., `[retained 35%]`). Color thresholds: <30% = red, <60% = yellow.
 - **Smart Heartbeat Parsing**: Snapshot freshness is validated against the `zep:alert:heartbeat:<label>` property. If unconfigured, the script intelligently parses time values directly from the label (e.g., `min15`, `hour2`, `day1`).
 - **Unconfigured Detection**: Highlights snapshots that exist but have no retention policy configured (`[unconfigured]`).
-- **Automation Ready**: Returns precise shell exit codes (`0` = OK, `1` = Warning, `2` = Critical) for monitoring integrations.
+- **Automation Ready**: Returns precise shell exit codes for monitoring integrations (see [Exit Codes](#exit-codes)).
 
 ### Basic Replication
 ```bash
@@ -194,6 +194,27 @@ For a full list of all available flags and configuration options:
 ```bash
 zep --help
 ```
+
+## Exit Codes
+
+Zep returns meaningful exit codes for both replication and `--status` commands, suitable for automation and monitoring integrations.
+
+### Replication
+
+| Code | Meaning | Description |
+| :--- | :--- | :--- |
+| `0` | **Success** | All nodes in the chain replicated successfully. |
+| `1` | **Error** | A non-recoverable error occurred (e.g., unreachable master, invalid arguments). With `zep:policy=fail` (default), replication aborts on the first failure. |
+| `2` | **Split-Brain** | Data divergence detected on a downstream dataset. Replication is halted to prevent silent data loss. The `zep:error:split-brain` property is set to `true` on the affected dataset. Recovery requires a `zfs rollback -r` to the latest common snapshot. |
+| `3` | **Partial Success** | With `zep:policy=resilience`, one or more downstream nodes were skipped (split-brain or unreachable) but the remaining chain continued. Review the output to identify skipped nodes. |
+
+### `--status`
+
+| Code | Meaning | Description |
+| :--- | :--- | :--- |
+| `0` | **OK** | All nodes and snapshots in the chain are healthy. |
+| `1` | **Warning** | Some snapshots are stale or retention thresholds are not met. |
+| `2` | **Critical** | One or more nodes are unreachable, split-brain is detected, or zpool capacity is critically low. |
 
 ## Modular Structure
 The project is split into several libraries for easier testing:

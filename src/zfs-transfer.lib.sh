@@ -334,6 +334,13 @@ zfsbud_core() {
     ds_name="${filesystem#*/}"
     local_ds="$filesystem"
     local remote_ds=""
+    
+    local prefix=$(get_snap_prefix "$filesystem")
+    local alias_val=${CLI_ALIAS:-$(hostname)}
+    local err_log="/tmp/${prefix}${alias_val}-replication.err"
+    
+    # Clear stale error log from previous runs or filesystems
+    > "$err_log"
 
     # If destination_parent_filesystem is already a full path (contains /), use it as the exact target
     if [[ "$destination_parent_filesystem" == *"/"* ]]; then
@@ -504,7 +511,8 @@ zfsbud_core() {
            if [[ -n "$offending_snaps" ]]; then
                alert_msg+="\n\nFull Snapshot Timeline (after common point):$offending_snaps"
            fi
-           echo -e "$alert_msg\n\n${hint_msg//|HINT_NL|/\\n}" > "/tmp/${prefix}${alias_val}-replication.err"
+           alert_msg+="\n\n${hint_msg//|HINT_NL|/\\n}"
+           echo -e "$alert_msg" > "/tmp/${prefix}${alias_val}-replication.err"
            return 2
        fi
 
