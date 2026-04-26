@@ -9,6 +9,7 @@ LIB_DIR=$(dirname "$ZEPLICATOR_CMD")
 # Phase 1: Source library modules
 source "${LIB_DIR}/zfs-common.lib.sh"
 source "${LIB_DIR}/zfs-status.lib.sh"
+source "${LIB_DIR}/zfs-stats.lib.sh"
 source "${LIB_DIR}/zfs-alerts.lib.sh"
 source "${LIB_DIR}/zfs-retention.lib.sh"
 source "${LIB_DIR}/zfs-transfer.lib.sh"
@@ -40,6 +41,7 @@ Primary Flags:
   --suspend/resume  Suspend or resume replication across the entire chain.
   --config          Enter configuration mode to view/set/clear 'zep:' ZFS properties.
   --status          Probe and display system status for the replication chain.
+  --stats           Output raw node statistics for status display (internal).
   --alias <name>    Manually specify the local node alias (overrides hostname detection).
 
 Advanced Flags:
@@ -92,6 +94,7 @@ IS_DONOR=false
 CONFIG_MODE=false
 config_args=()
 STATUS_MODE=false
+STATS_MODE=false
 
 CLI_ALIAS=""
 
@@ -120,6 +123,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --snap-list) VIRTUAL_SNAPS_INCOMING="$2"; shift 2 ;;
         --status) STATUS_MODE=true; shift ;;
+        --stats) STATS_MODE=true; shift ;;
         --show-configured-only) STATUS_CONFIGURED_ONLY=true; shift ;;
         --config) 
             CONFIG_MODE=true
@@ -166,8 +170,8 @@ validate_args() {
         errors+=("ERR: --promote requires one of: --auto, --snap <name>, or --destroy-chain")
     fi
 
-    # 1. Filesystem required (except for status/config/help)
-    if [[ "$STATUS_MODE" != true && "$CONFIG_MODE" != true ]]; then
+    # 1. Filesystem required (except for status/stats/config)
+    if [[ "$STATUS_MODE" != true && "$STATS_MODE" != true && "$CONFIG_MODE" != true ]]; then
         if [[ -z "$raw_filesystem" ]]; then
             # Only show usage if there are no other errors
             if [[ ${#errors[@]} -eq 0 ]]; then
@@ -259,9 +263,6 @@ fi
 
 filesystem=$local_ds # Ensure helper functions use the local path
 
-# Setup cleanup trap early
-trap cleanup EXIT
-
 REPL_SNAP_PREFIX=$(get_snap_prefix "$filesystem")
 REPL_DS_SAFE="${filesystem//\//-}"
 REPL_TMP_PREFIX="/tmp/${REPL_SNAP_PREFIX}${CLI_ALIAS:-$(hostname)}-${REPL_DS_SAFE}"
@@ -270,11 +271,20 @@ REPL_HINT_FILE="${REPL_TMP_PREFIX}-replication.hint"
 REPL_ALERTS_DIR="${REPL_TMP_PREFIX}-repl-alerts"
 export REPL_ERR_FILE REPL_HINT_FILE REPL_ALERTS_DIR
 
+# Handle Stats logic (internal: called via ssh by status cmd)
+if [[ "$STATS_MODE" == true ]]; then
+    cmd_stats
+    exit $?
+fi
+
 # Handle Status logic
 if [[ "$STATUS_MODE" == true ]]; then
     cmd_status "$raw_filesystem" "$STATUS_CONFIGURED_ONLY"
     exit $?
 fi
+
+# Setup cleanup trap (after stats/status exits, so it doesn't fire for them)
+trap cleanup EXIT
 
 # Sync properties to nodes across the entire chain
 sync_chain_props() {
@@ -809,7 +819,6 @@ if [[ -n "$REPL_CHAIN" ]]; then
     
     dry_flag=""
     [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
 
     # Validate label has configured retention policies
     validate_label() {
@@ -1317,7 +1326,8 @@ dry_done=""
 [[ "$DRY_RUN" == true ]] && dry_done=" [DRY RUN]"
 echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Done${C_RESET}${dry_done}: $(date)"
 
-# Clean up temp files
+# Clean up all replication temp files at the very end
 rm -f "$REPL_ERR_FILE" "$REPL_HINT_FILE"
+rm -f "${LOCKFILE}.cnt" 2>/dev/null
 
 exit ${exit_code:-0}

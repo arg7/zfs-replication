@@ -420,8 +420,7 @@ die() {
 }
 
 cleanup() {
-    [[ -n "$LOCKFILE" ]] && rm -f "$LOCKFILE" "${LOCKFILE}.cnt"
-    [[ -n "$REPL_ERR_FILE" ]] && rm -f "$REPL_ERR_FILE"
+    [[ -n "$LOCKFILE" ]] && rm -f "$LOCKFILE"
 }
 
 check_stuck_job() {
@@ -485,7 +484,6 @@ check_stuck_job() {
     done
 
     echo "$$" > "$LOCKFILE"
-    trap cleanup EXIT
 }
 
 # High-performance pipe monitor to track bytes and update progress file

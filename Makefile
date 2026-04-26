@@ -1,7 +1,7 @@
 BUILD_DIR := build
 OUTPUT := $(BUILD_DIR)/zep
 IOMON := $(BUILD_DIR)/iomon
-LIBS := src/zfs-common.lib.sh src/zfs-status.lib.sh src/zfs-alerts.lib.sh src/zfs-retention.lib.sh src/zfs-transfer.lib.sh
+LIBS := src/zfs-common.lib.sh src/zfs-stats.lib.sh src/zfs-status.lib.sh src/zfs-alerts.lib.sh src/zfs-retention.lib.sh src/zfs-transfer.lib.sh
 MAIN := src/zeplicator
 
 PREFIX ?= /usr/local

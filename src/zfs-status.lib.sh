@@ -8,79 +8,12 @@ get_node_state() {
     local fqdn=$(resolve_node_fqdn "$alias" "$raw_ds")
     local user=$(resolve_node_user "$alias" "$raw_ds")
     local ssh_t=$(resolve_ssh_timeout "$raw_ds")
-
-    # The command to run on the node (local or remote)
-    local node_role_var="$node_role"
-    local cmd='
-        # Role passed from caller
-        _node_role="'"$node_role_var"'"
-
-        # 1. Zpools
-        zpool list -H -o name,health,capacity 2>/dev/null | while read -r line; do
-            echo "ZPOOL:$line"
-        done
-
-        # 2. Zpool IO stats (one-second sample)
-        zpool iostat -H 1 1 2>/dev/null | while read -r line; do
-            echo "IOSTAT:$line"
-        done
-
-        # 2. Filesystems with zep: properties
-        zfs list -H -o name -r "'$raw_ds'" 2>/dev/null | while read -r ds; do
-            props=$(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
-            if [[ -n "$props" ]]; then
-                # Find unique labels for this filesystem
-                prefix=$(echo "$props" | grep "zep:snap_prefix" | cut -f2)
-                [[ -z "$prefix" || "$prefix" == "-" ]] && prefix="zep_"
-                
-                snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
-                echo "$snap_list" | awk "{print \$1}" | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u | while read -r label; do
-                    [[ -z "$label" ]] && continue
-                    
-                    # Get configured status and heartbeat
-                    is_configured="false"
-                    heartbeat=$(echo "$props" | grep ":alert:heartbeat:${label}" | cut -f2)
-                    if echo "$props" | grep -q ":keep:${label}"; then
-                        is_configured="true"
-                    fi
-
-                    label_snaps=$(echo "$snap_list" | grep "@${prefix}${label}-" || true)
-                    snap_count=$(echo "$label_snaps" | grep -c "@${prefix}${label}-" 2>/dev/null || echo 0)
-
-                    # Resolve keep value for this label
-                    keep_val=""
-                    # Prefer role-specific keep: zep:role:<_node_role>:keep:<label>
-                    [[ -n "$_node_role" ]] && keep_val=$(echo "$props" | grep "role:${_node_role}:keep:${label}" | head -n 1 | cut -f2)
-                    # Fallback: any role-based keep property
-                    [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=$(echo "$props" | grep "role:.*:keep:${label}" | head -n 1 | cut -f2)
-                    [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=0
-
-                    if [[ -n "$label_snaps" ]]; then
-                        latest=$(echo "$label_snaps" | head -n 1)
-                        snap_name=$(echo "$latest" | awk "{print \$1}")
-                        then=$(echo "$latest" | awk "{print \$2}")
-                        # Calculate age in minutes
-                        now=$(date +%s)
-                        if [[ -n "$then" ]]; then
-                            age=$(( (now - then) / 60 ))
-
-                            # Check for split-brain error flag
-                            has_sb=$(echo "$props" | grep ":error:split-brain" | cut -f2)
-                            [[ "$has_sb" != "true" ]] && has_sb="false"
-
-                            echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat|$has_sb|$snap_count|$keep_val"
-                        fi
-                    fi
-                done
-            fi
-        done
-    '
-    
     local output
+
     if [[ "$alias" == "$(get_local_alias "$raw_ds" "")" ]]; then
-        output=$(eval "$cmd" 2>/dev/null)
+        output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats 2>/dev/null)
     else
-        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "$cmd" 2>/dev/null)
+        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "$ZEPLICATOR_CMD --alias $alias --stats" 2>/dev/null)
     fi
 
     if [[ -z "$output" ]]; then
@@ -136,6 +69,20 @@ cmd_status() {
         zpools=$(echo "$out" | grep "^ZPOOL:" | cut -d':' -f2-)
         iostats=$(echo "$out" | grep "^IOSTAT:" | cut -d':' -f2-)
         filesystems_raw=$(echo "$out" | grep "^FILESYSTEM|")
+        transfers_raw=$(echo "$out" | grep "^TRANSFER|")
+
+        # Build transfer progress lookup: key=safe_ds, value="pp%"
+        declare -A transfer_progress=()
+        while IFS='|' read -r _ tds test tactual; do
+            [[ -z "$tds" ]] && continue
+            if [[ "$test" -gt 0 ]]; then
+                local pct=$(( tactual * 100 / test ))
+                [[ $pct -gt 100 ]] && pct=100
+                transfer_progress["$tds"]="${pct}%"
+            else
+                transfer_progress["$tds"]="0%"
+            fi
+        done <<< "$transfers_raw"
         
         # Pre-evaluate filesystem colors to allow hierarchical bubbling
         filesystems=""
@@ -326,7 +273,13 @@ cmd_status() {
                 sb_label=""
                 [[ "$has_sb_ds" == "true" ]] && sb_label=" ${C_RED}${C_BLINK}[split-brain]${C_RESET}"
                 
-                echo -e "    ${c_ds}📁${C_RESET} ${ds_path#$p_name/}${sb_label}"
+                ds_safe="${ds_path//\//-}"
+                sync_badge=""
+                if [[ -n "${transfer_progress[$ds_safe]+x}" ]]; then
+                    sync_badge=" ${C_CYAN}[sync: ${transfer_progress[$ds_safe]}]${C_RESET}"
+                fi
+
+                echo -e "    ${c_ds}📁${C_RESET} ${ds_path#$p_name/}${sync_badge}${sb_label}"
                 while read -r line; do
                     [[ -z "$line" ]] && continue
                     # FILESYSTEM|ds|label|snap|age|conf|hb|has_sb|snap_count|keep_val|c_logic|ret_pct|ret_color
