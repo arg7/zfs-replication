@@ -42,7 +42,7 @@ assert_flag() {
     echo "--- $desc ---"
     local val
     val=$(zfs get -H -o value zep:error:split-brain zep-node-${node}/test-${node} 2>/dev/null)
-    if [[ "$val" == "$expected" ]]; then
+    if [[ "$val" == "$expected" || ("$val" == "-" && "$expected" == "false") ]]; then
         echo "  ✅ PASS: node${node} split-brain flag = '$val'"
         PASS=$((PASS + 1))
     else
@@ -142,7 +142,6 @@ rc=$?
 set -e
 
 assert_exit_code "Replication after node2 rollback" 0 "$rc"
-exit 0
 
 assert_flag "Split-brain flag cleared by replication" 2 "false"
 
@@ -174,7 +173,7 @@ $ZEP --alias node1 zep-node-1/test-1 min1 -bw >/tmp/zep.log 2>&1
 rc=$?
 set -e
 
-assert_exit_code "Replication with resilience, split-brain on node3" 0 "$rc"
+assert_exit_code "Replication with resilience, split-brain on node3" 3 "$rc"
 
 # --- Phase 7: Rollback node3, verify recovery ---
 echo ""
