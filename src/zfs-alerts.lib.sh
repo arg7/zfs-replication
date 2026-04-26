@@ -3,13 +3,27 @@
 # zfs-alerts.lib.sh - Notification functions for Zeplicator
 
 send_smtp_alert() {
-    local level=${1:-warn}
-    local msg=$2
-    shift 2 || true
+    local level="warn"
+    local msg=""
     local include_detail=false
+
+    # Handle first argument as level if it matches known levels
+    if [[ "$1" =~ ^(info|warning|warn|critical|error)$ ]]; then
+        level="$1"
+        shift
+    fi
+
+    # Parse remaining arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --detail) include_detail=true ;;
+            --detail)
+                include_detail=true
+                ;;
+            *)
+                if [[ -z "$msg" ]]; then
+                    msg="$1"
+                fi
+                ;;
         esac
         shift
     done
