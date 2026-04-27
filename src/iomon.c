@@ -26,12 +26,13 @@ void handle_signal(int sig) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <lock_file> <interval_sec>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <lock_file> <interval_sec> [timeout_sec]\n", argv[0]);
         return 1;
     }
 
     const char *lock_base = argv[1];
     int interval = atoi(argv[2]);
+    int timeout_sec = (argc >= 4) ? atoi(argv[3]) : 0;
     snprintf(g_cnt_file, sizeof(g_cnt_file), "%s.cnt", lock_base);
 
     signal(SIGTERM, handle_signal);
@@ -40,6 +41,7 @@ int main(int argc, char *argv[]) {
     unsigned char *buffer = malloc(BUF_SIZE);
     if (!buffer) return 1;
 
+    time_t start_time = time(NULL);
     time_t last_update = 0;
     ssize_t bytes_read;
 
@@ -47,6 +49,13 @@ int main(int argc, char *argv[]) {
     write_progress();
 
     while ((bytes_read = read(STDIN_FILENO, buffer, BUF_SIZE)) > 0) {
+        if (timeout_sec > 0 && (time(NULL) - start_time >= timeout_sec)) {
+            fprintf(stderr, "iomon: timeout after %ds\n", timeout_sec);
+            write_progress();
+            free(buffer);
+            return 143;
+        }
+
         ssize_t bytes_written = 0;
         while (bytes_written < bytes_read) {
             ssize_t res = write(STDOUT_FILENO, buffer + bytes_written, bytes_read - bytes_written);

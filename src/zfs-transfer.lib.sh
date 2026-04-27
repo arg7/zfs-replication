@@ -190,8 +190,54 @@ zfsbud_core() {
   send_snapshot() {
     local remote_ds="$1"
     local is_initial="$2"
+    local resume_token="$3"
     local local_ds="$filesystem"
     local ssh_t=$(resolve_ssh_timeout "$filesystem")
+
+    # Read debug timeout before any pipeline execution
+    local debug_timeout=$(get_zfs_prop "zep:debug:send_timeout" "$local_ds")
+    [[ "$debug_timeout" =~ ^[0-9]+[smhdMY]$ ]] && debug_timeout=$(parse_time_to_seconds "$debug_timeout")
+    [[ ! "$debug_timeout" =~ ^[0-9]+$ ]] && debug_timeout=""
+    local iomon_timeout=""
+    [[ "$debug_timeout" =~ ^[0-9]+$ && "$debug_timeout" -gt 0 ]] && iomon_timeout="$debug_timeout"
+
+    # --- RESUME PATH: complete an interrupted transfer ---
+    if [ -n "$resume_token" ]; then
+        local resume_recv_args="-u"
+        [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"
+
+        local prefix=$(get_snap_prefix "$filesystem")
+        local alias_val=${CLI_ALIAS:-$(hostname)}
+        local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
+        local err_log="${REPL_ERR_FILE:?REPL_ERR_FILE not set}"
+
+        > "${lock_path}.cnt"
+
+        if [[ "$dry_run" == true ]]; then
+            zbud_msg "  🔄 [DRY RUN] Would resume send to $remote_ds"
+            return 0
+        fi
+
+        local recv_cmd
+        if [ -n "$remote_shell" ]; then
+            recv_cmd="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" | zstd | $remote_shell \"zstd -d | zfs recv $resume_recv_args $remote_ds\""
+        else
+            recv_cmd="zfs recv $resume_recv_args \"$remote_ds\""
+        fi
+
+        local zfs_resume_pipeline="zfs send $verbose -t \"$resume_token\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd"
+
+        set -o pipefail
+        eval "$zfs_resume_pipeline"
+        local status=$?
+        set +o pipefail
+
+        if [[ $status -ne 0 ]]; then
+            zbud_msg "Resume pipeline failed with status $status"
+            return $status
+        fi
+        return 0
+    fi
 
     # Extract snapshot info
     local latest_line=${source_snapshots[-1]}
@@ -276,20 +322,24 @@ zfsbud_core() {
       echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
     fi
 
+    # Build recv pipeline tail: remote adds mbuffer + zstd + ssh wrapper; local is bare
+    local recv_cmd
+    if [ -n "$remote_shell" ]; then
+      local remote_zfs_recv="zstd -d | zfs recv $recv_args $remote_ds"
+      recv_cmd="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"$remote_zfs_recv\" 2>>\"$err_log\""
+    else
+      recv_cmd="zfs recv $recv_args \"$remote_ds\" 2>>\"$err_log\""
+    fi
+
+    # Build full pipeline command
+    local zfs_send_pipeline="zfs send $send_args \"$latest_snapshot_source\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd"
+
     # Execute transfer pipeline
     local status=0
-    if [ -n "$remote_shell" ]; then
-      if [[ "$is_initial" == "true" ]]; then
-        ! bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>$err_log | zstd 2>>$err_log | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>$err_log" && status=1
-      else
-        set -o pipefail
-        bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>$err_log | zstd 2>>$err_log | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_args $remote_ds\" 2>>$err_log"
-        status=$?
-        set +o pipefail
-      fi
-    else
-      ! bash -c "set -o pipefail; zfs send $send_args \"$latest_snapshot_source\" 2>>$err_log | iomon \"$lock_path\" 1 | zfs recv $recv_args \"$remote_ds\" 2>>$err_log" && status=1
-    fi
+    set -o pipefail
+    eval "$zfs_send_pipeline"
+    status=$?
+    set +o pipefail
 
     # Error handling for incremental transfers
     if [[ "$is_initial" != "true" && $status -ne 0 ]]; then
@@ -301,7 +351,7 @@ zfsbud_core() {
         if [[ -f $err_log ]]; then
           while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
         fi
-        return 1
+        return $status
       fi
     fi
 
@@ -366,18 +416,10 @@ zfsbud_core() {
     fi
 
     set_resume_token "$remote_ds"
-    
+
     if [ -n "$resume_token" ]; then
-       # Resume logic simplified
-       if [ -z "$dry_run" ]; then
-         local resume_recv_args="-u"
-         [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"
-         if [ -n "$remote_shell" ]; then
-           zfs send $verbose -t "$resume_token" | mbuffer -q $mbuffer_throttle -m "$mbuffer_size" | zstd | $remote_shell "zstd -d | zfs recv $resume_recv_args ${remote_ds}"
-         else
-           zfs send $verbose -t "$resume_token" | zfs recv $resume_recv_args "${remote_ds}"
-         fi
-       fi
+       log_message "INFO: Found receive_resume_token ($resume_token) on $remote_ds, resuming interrupted transfer"
+       send_snapshot "$remote_ds" "false" "$resume_token" || return $?
     fi
 
     set_destination_snapshots "$remote_ds"
@@ -389,7 +431,7 @@ zfsbud_core() {
 
     if ! set_common_snapshot; then
        if [ -n "$initial" ]; then
-          send_snapshot "$remote_ds" "true" || return 1
+          send_snapshot "$remote_ds" "true" || return $?
        else
           zbud_warn "No common snapshots for $local_ds."
           send_smtp_alert "warning" "WARNING: No common snapshots for $local_ds to $remote_ds."
@@ -523,7 +565,7 @@ zfsbud_core() {
        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
        fi
-       send_snapshot "$remote_ds" "false" || return 1
+       send_snapshot "$remote_ds" "false" || return $?
     fi
   done
   return 0

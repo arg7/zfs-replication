@@ -13,6 +13,11 @@ zpool() {
     command zpool "$@"
 }
 
+ssh() {
+    log_message "AUDIT: ssh $*"
+    command ssh "$@"
+}
+
 # Associative array for in-memory property caching (per-run)
 declare -A ZEP_PROP_CACHE
 
