@@ -1077,42 +1077,36 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
     hop_fqdn=$(resolve_node_fqdn "$hop_node" "$raw_filesystem")
     hop_user=$(resolve_node_user "$hop_node" "$raw_filesystem")
     HOP_TARGET="${hop_user}@${hop_fqdn}"
-    
-    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🔍${C_RESET} Checking connectivity to $hop_node ($hop_fqdn)..."
     NEXT_HOP_POOL=$(resolve_node_pool "$hop_node" "$raw_filesystem")
-    if [[ $? -eq 255 ]]; then
-        if [[ "$REPL_POLICY" == "resilience" ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Node $hop_node is unreachable (Pre-flight). Skipping due to policy=resilience..."
-            REPLICATION_PARTIAL=true
-            continue
-        else
-            die "Node $hop_node is unreachable (Pre-flight). Aborting due to policy=fail."
-        fi
-    fi
-    
-    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🚀${C_RESET} Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
-    zfsbud_opts=""
-    if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
-    if [[ "$DRY_RUN" == true ]]; then zfsbud_opts="${zfsbud_opts} -d"; fi
-    
+
     remote_ds=$(resolve_node_filesystem "$hop_node" "$raw_filesystem")
-    
-    # Check if it is currently in split-brain state (before replication potentially overwrites properties)
+
+    # Check if destination is currently in split-brain state
     PRE_REPL_SB=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
 
+    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🚀${C_RESET} Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
+
     TRANSFER_DONE=false
-    zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"
-    ZBUD_STATUS=$?
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${CHAIN_PREFIX}  ${C_CYAN}⏳${C_RESET} [DRY RUN] Would replicate $local_ds -> $HOP_TARGET"
+        ZBUD_STATUS=0
+        TRANSFER_DONE=true
+    else
+        zfsbud_opts=""
+        if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
+        zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"
+        ZBUD_STATUS=$?
+    fi
 
     if [[ $ZBUD_STATUS -eq 0 ]]; then
         echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Replication to $HOP_TARGET successful."
-        
-        # Check if it was previously in split-brain state based on pre-flight check
+
+        # Check if it was previously in split-brain state
         if [[ "$PRE_REPL_SB" == "true" ]]; then
             zbud_warn "Split-Brain condition resolved on $hop_node ($remote_ds). Clearing error flag."
             send_smtp_alert "warning" "NOTICE: Split-Brain condition on $remote_ds at $hop_node has been successfully resolved. The replication succeeded and the error flag is being cleared."
         fi
-        
+
         # Clear any stale split-brain error flag
         ssh "$HOP_TARGET" "zfs inherit zep:error:split-brain $remote_ds" 2>/dev/null
         TRANSFER_DONE=true
