@@ -11,7 +11,7 @@ SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
 [[ -f "$SCRIPT_DIR/test.conf" ]] && source "$SCRIPT_DIR/test.conf"
 
 NUM_NODES=${NUM_NODES:-3}
-ZEP="$SCRIPT_DIR/../build/zep"
+ZEP="zep"
 
 NODES=()
 for (( i=1; i<=NUM_NODES; i++ )); do NODES+=("$i"); done
