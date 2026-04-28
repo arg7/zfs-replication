@@ -65,4 +65,7 @@ fi
 # Clean up zep log and temp files
 rm -rf /tmp/zep_* 2>/dev/null || true
 
+# Remove zep rotation cron entries
+crontab -l 2>/dev/null | grep -v 'zep.*--rotate' | crontab - 2>/dev/null || true
+
 echo "=== Cleanup complete ==="

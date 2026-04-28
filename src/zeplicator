@@ -1331,8 +1331,6 @@ if [[ "$REPLICATION_SUCCESS" == true ]]; then
             zfs set zep:shipped=true "$local_ds@$LATEST_SNAP"
         fi
     fi
-    purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
-
 elif [[ "$exit_code" -ne 0 && "$HAD_SPLIT_BRAIN" != true ]]; then
     die "ERR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}" $exit_code
 else

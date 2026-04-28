@@ -249,3 +249,15 @@ echo ""
 echo "=== Initialization complete ==="
 echo "Pools on ramdisk: $RAMDISK"
 echo "To clean up: bash $SCRIPT_DIR/done.sh"
+
+# Setup cron for snapshot rotation (each minute, per-node --rotate)
+echo "Installing root crontab for snapshot rotation..."
+CRON_TMP=$(mktemp)
+# Keep existing crontab (if any), stripping old zep rotation entries
+crontab -l 2>/dev/null | grep -v 'zep.*--rotate' > "$CRON_TMP" || true
+for i in $(seq 1 "$NUM_NODES"); do
+    echo "* * * * * $ZEP_BIN --alias node$i --rotate zep-node-$i/test-$i >/dev/null 2>&1" >> "$CRON_TMP"
+done
+crontab "$CRON_TMP"
+rm -f "$CRON_TMP"
+echo "  ✅ Cron installed for nodes 1-$NUM_NODES (snapshot rotation every minute)"
