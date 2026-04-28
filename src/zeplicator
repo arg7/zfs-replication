@@ -1345,7 +1345,6 @@ if [[ "$REPLICATION_SUCCESS" == true ]]; then
             zfs set zep:shipped=true "$local_ds@$LATEST_SNAP"
         fi
     fi
-    purge_shipped_snapshots "$local_ds" "$label" "$RESOLVED_KEEP"
     
     # Internal state reporting for upstream verification (only needed if NOT the initiating Master)
     if [[ "$IS_MASTER" == false || "$CASCADED" == true ]]; then
