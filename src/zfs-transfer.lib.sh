@@ -427,6 +427,11 @@ zfsbud_core() {
             set +o pipefail
             if [[ $status -ne 0 ]]; then
                 zbud_msg "Force retry also failed with status $status"
+                if [ -n "$remote_shell" ]; then
+                    $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null
+                else
+                    zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null
+                fi
                 send_smtp_alert "critical" --detail "Split-Brain on $remote_ds — force retry failed. Manual intervention required."
                 return $status
             fi
@@ -438,6 +443,14 @@ zfsbud_core() {
             done <<< "$(echo -e "${hint_msg//|/\\n}")"
             zbud_msg ""
             echo "$hint_msg" > "${REPL_HINT_FILE:?REPL_HINT_FILE not set}"
+
+            if [ -n "$remote_shell" ]; then
+                $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null && \
+                    zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds on destination with split-brain error flag."
+            else
+                zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null && \
+                    zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds with split-brain error flag."
+            fi
 
             local clean_hint=$(echo -e "${hint_msg//|/\\n}" | sed 's/\x1b\[[0-9;]*m//g')
             local clean_diff=$(echo -e "$diff_output" | sed 's/\x1b\[[0-9;]*m//g')
