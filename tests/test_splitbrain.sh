@@ -65,8 +65,7 @@ rollback_node() {
 
 write_error() {
     local node="$1"
-    rm -f /zep-node-${node}/test-${node}/error 2>/dev/null || true
-    echo "divergent" > /zep-node-${node}/test-${node}/error
+    echo "divergent: $(date)" >> /zep-node-${node}/test-${node}/error
 }
 
 clear_error() {
@@ -85,17 +84,14 @@ echo "=== Phase 1: Healthy baseline ==="
 ensure_chain
 rollback_node 2; rollback_node 3
 echo "  Chain: node1 → node2 → node3"
-
-zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
+$ZEP --alias node1 zep-node-1/test-1 --config policy=fail >/dev/null
 
 rc=0
 set +e
-$ZEP --alias node1 zep-node-1/test-1 min1 >/tmp/zep.log 2>&1
+$ZEP --alias node1 zep-node-1/test-1 --init min1 >/tmp/zep.log 2>&1
 rc=$?
 set -e
-assert_exit_code "Healthy replication from node1" 0 "$rc"
-
-# --- Phase 2: Split-brain on node2 → exit 2 ---
+assert_exit_code "Initial replication from node1" 0 "$rc"
 echo ""
 echo "=== Phase 2: Split-brain on node2 ==="
 
@@ -115,7 +111,7 @@ assert_flag "Split-brain flag set on node2" 2 "true"
 echo ""
 echo "=== Phase 3: Resilience mode ==="
 
-zfs set zep:policy=resilience zep-node-1/test-1 2>/dev/null
+$ZEP --alias node1 zep-node-1/test-1 --config policy=resilience >/dev/null
 echo "  policy=resilience set on node1 (master)"
 
 rc=0
@@ -130,7 +126,7 @@ assert_exit_code "Replication with resilience, split-brain on node2" 3 "$rc"
 echo ""
 echo "=== Phase 4: Rollback node2 and recovery ==="
 
-zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
+$ZEP --alias node1 zep-node-1/test-1 --config policy=fail >/dev/null
 rollback_node 2
 
 assert_flag "Split-brain flag after rollback on node2" 2 "true"
@@ -145,9 +141,79 @@ assert_exit_code "Replication after node2 rollback" 0 "$rc"
 
 assert_flag "Split-brain flag cleared by replication" 2 "false"
 
-# --- Phase 5: Split-brain on node3 (deep in chain) → exit 2 ---
+# --- Phase 5: force=true overrides split-brain check ---
 echo ""
-echo "=== Phase 5: Split-brain on node3 ==="
+echo "=== Phase 5: force=true overrides divergence ==="
+
+write_error 3
+echo "  Divergent data written to node3"
+$ZEP --alias node1 zep-node-1/test-1 --config zfs:force=true >/dev/null
+echo "  zfs:force=true set on node1 (master)"
+
+rc=0
+set +e
+$ZEP --alias node1 zep-node-1/test-1 min1 -bw >/tmp/zep.log 2>&1
+rc=$?
+set -e
+
+assert_exit_code "Replication with force=true, divergence on node3" 0 "$rc"
+echo "  Verifying divergent data on node3 was overwritten..."
+if [[ ! -f /zep-node-3/test-3/error ]]; then
+    echo "  ✅ PASS: divergent file removed by zfs recv -F"
+    PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1))
+else
+    echo "  ❌ FAIL: divergent file still exists"
+    FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1))
+fi
+
+# Reset force for remaining tests
+$ZEP --alias node1 zep-node-1/test-1 --config zfs:force=false >/dev/null
+
+# --- Phase 5b: --divergence-report direct invocation ---
+echo ""
+echo "=== Phase 5b: --divergence-report command ==="
+
+# Get fresh common snapshot AFTER force replication synced node3
+common_snap=$(zfs list -t snap -o name -H -S creation zep-node-3/test-3 2>/dev/null | grep '@zep_min1-' | tail -1)
+echo "  Common snapshot on node3: $common_snap"
+
+write_error 3
+echo "  Divergent data written to node3"
+
+rc=0
+set +e
+bash -x $ZEP zep-node-3/test-3 --alias node3 --divergence-report "${common_snap#*@}" >/tmp/div_report.log 2>/tmp/dt.log
+rc=$?
+set -e
+
+assert_exit_code "--divergence-report detects divergence" 2 "$rc"
+if grep -q "error" /tmp/div_report.log; then
+    echo "  ✅ PASS: report output contains divergence details"
+    PASS=$((PASS + 1))
+    TOTAL=$((TOTAL + 1))
+else
+    echo "  ❌ FAIL: report output missing divergence details"
+    FAIL=$((FAIL + 1))
+    TOTAL=$((TOTAL + 1))
+fi
+
+# Clear divergence
+rollback_node 3
+
+# Verify clean report returns 0
+rc=0
+set +e
+$ZEP zep-node-3/test-3 --alias node3 --divergence-report "${common_snap#@}" >/tmp/div_clean.log 2>&1
+rc=$?
+set -e
+
+assert_exit_code "--divergence-report clean dataset returns 0" 0 "$rc"
+
+# --- Phase 6: Split-brain on node3 (deep in chain) → exit 2 ---
+echo ""
+echo "=== Phase 6: Split-brain on node3 ==="
 
 write_error 3
 echo "  Divergent data written to node3"
@@ -161,11 +227,11 @@ set -e
 assert_exit_code "Replication from node1 with split-brain on node3" 2 "$rc"
 assert_flag "Split-brain flag set on node3" 3 "true"
 
-# --- Phase 6: Resilience mode with node3 divergence → exit 0 ---
+# --- Phase 7: Resilience mode with node3 divergence → exit 0 ---
 echo ""
-echo "=== Phase 6: Resilience mode with node3 ==="
+echo "=== Phase 7: Resilience mode with node3 ==="
 
-zfs set zep:policy=resilience zep-node-1/test-1 2>/dev/null
+$ZEP --alias node1 zep-node-1/test-1 --config policy=resilience >/dev/null
 
 rc=0
 set +e
@@ -175,11 +241,11 @@ set -e
 
 assert_exit_code "Replication with resilience, split-brain on node3" 3 "$rc"
 
-# --- Phase 7: Rollback node3, verify recovery ---
+# --- Phase 8: Rollback node3, verify recovery ---
 echo ""
-echo "=== Phase 7: Rollback node3 and recovery ==="
+echo "=== Phase 8: Rollback node3 and recovery ==="
 
-zfs set zep:policy=fail zep-node-1/test-1 2>/dev/null
+$ZEP --alias node1 zep-node-1/test-1 --config policy=fail >/dev/null
 rollback_node 3
 
 assert_flag "Split-brain flag after rollback on node3" 3 "true"

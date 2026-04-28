@@ -14,6 +14,21 @@ fi
 
 NUM_NODES=${NUM_NODES:-3}
 POOL_SIZE=${POOL_SIZE:-128M}
+RAMDISK="/tmp/zep-ramdisk"
+
+# --- Ramdisk setup ---
+# Convert POOL_SIZE to bytes (handles suffixes like 128M, 256M, 1G)
+pool_bytes=$(numfmt --from=iec "$POOL_SIZE")
+ramdisk_size=$(( pool_bytes * NUM_NODES + pool_bytes / 2 ))  # pool_size * nodes + 50% headroom
+
+if mountpoint -q "$RAMDISK" 2>/dev/null; then
+    echo "Ramdisk already mounted at $RAMDISK"
+else
+    echo "Creating ${ramdisk_size}-byte ramdisk at $RAMDISK..."
+    mkdir -p "$RAMDISK"
+    mount -t tmpfs -o size="${ramdisk_size}" tmpfs "$RAMDISK"
+    echo "Ramdisk mounted at $RAMDISK"
+fi
 
 # Ensure build/zep is ready
 echo "Building zep..."
@@ -89,7 +104,7 @@ user=root
 zfs:force=$ZFS_FORCE
 zfs:raw=$ZFS_RAW
 zfs:resume=$ZFS_RESUME
-zfs:rate=$ZFS_RATE
+zfs:throttle=$ZFS_THROTTLE
 EOF
 
 # Add node definitions to master config
@@ -106,12 +121,12 @@ echo "Initializing $NUM_NODES nodes with $POOL_SIZE pools..."
 
 for i in $(seq 1 "$NUM_NODES"); do
     POOL_NAME="zep-node-$i"
-    IMG_FILE="/tmp/$POOL_NAME.img"
+    IMG_FILE="$RAMDISK/$POOL_NAME.img"
     DATASET_NAME="$POOL_NAME/test-$i"
 
     echo "Setting up $POOL_NAME..."
 
-    # Create sparse file
+    # Create sparse file on ramdisk
     truncate -s "$POOL_SIZE" "$IMG_FILE"
 
     # Create ZFS pool
@@ -119,7 +134,7 @@ for i in $(seq 1 "$NUM_NODES"); do
         echo "Pool $POOL_NAME already exists, destroying it..."
         zpool destroy "$POOL_NAME"
     fi
-    
+
     zpool create "$POOL_NAME" "$IMG_FILE"
 
     # Create dataset only on master (node1); chain nodes pre-created for zfs recv
@@ -201,4 +216,7 @@ MASTER_DATASET="zep-node-1/test-1"
 echo "Importing configuration to $MASTER_DATASET using zep..."
 "$ZEP_BIN" "$MASTER_DATASET" --alias node1 --config --import "$CONFIG_FILE"
 
-echo "Initialization complete."
+echo ""
+echo "=== Initialization complete ==="
+echo "Pools on ramdisk: $RAMDISK"
+echo "To clean up: bash $SCRIPT_DIR/done.sh"

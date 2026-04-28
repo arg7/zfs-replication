@@ -52,6 +52,8 @@ Advanced Flags:
   --apply-props <b> Apply encoded replication properties and exit (internal).
   --target <node>   Point-to-point transfer to a specific node (ignores chain).
   --donor           Run as a donor peer to heal a downstream node.
+  --divergence-report <snap>
+                    Check a remote dataset for split-brain divergence (internal).
   -y                Assume 'yes' for destructive operations (promotion/rollback).
   --help, -h        Show this help message.
 
@@ -98,6 +100,9 @@ STATUS_MODE=false
 STATS_MODE=false
 ROTATE_MODE=false
 
+DIV_MODE=false
+DIV_COMMON=""
+
 CLI_ALIAS=""
 
 # Parse arguments
@@ -128,6 +133,7 @@ while [[ $# -gt 0 ]]; do
         --stats) STATS_MODE=true; shift ;;
         --rotate) ROTATE_MODE=true; shift ;;
         --show-configured-only) STATUS_CONFIGURED_ONLY=true; shift ;;
+        --divergence-report) DIV_MODE=true; DIV_COMMON="$2"; shift 2 ;;
         --config) 
             CONFIG_MODE=true
             shift
@@ -226,6 +232,18 @@ validate_args() {
 
 validate_args
 # --- End pre-flight validation ---
+
+# --- Divergence report mode (internal) ---
+if [[ "$DIV_MODE" == true ]]; then
+    if [[ -z "$raw_filesystem" || -z "$DIV_COMMON" ]]; then
+        echo "usage: zep <dataset> --divergence-report <common_snapshot>" >&2
+        exit 1
+    fi
+    # Accept either "snap_name" or "dataset@snap_name" — strip the dataset@ prefix if present
+    snap_only="${DIV_COMMON##*@}"
+    divergence_report "$raw_filesystem" "$snap_only"
+    exit $?
+fi
 
 # Cache ZFS properties early — before any get_zfs_prop calls
 cache_zfs_props "$raw_filesystem"
@@ -1027,7 +1045,13 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
         VIRTUAL_SNAP_CREATED="$snap_name_base"
     elif zfs list -t snap "$snap_name" >/dev/null 2>&1; then
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Snapshot $snap_name already exists. Proceeding with replication for existing snapshot (DEBUG)..."
+        # Snapshot already exists — make name unique by adding seconds
+        timestamp=$(date -u +%Y-%m-%d-%H%M%S)
+        snap_name_base="${REPL_SNAP_PREFIX}${label}-${timestamp}"
+        snap_name="${local_ds}@${snap_name_base}"
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name (seconds-unique)"
+        zfs snapshot "$snap_name" 2>&1 | indent_output
+        [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
     else
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name"
         zfs snapshot "$snap_name" 2>&1 | indent_output
@@ -1146,8 +1170,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
     else
-        # If the destination currently has a split brain error, local replication likely failed due to 
+        # DISABLED: Searching chain for a better donor
+        # TODO: re-enable donor discovery when ready
+        # If the destination currently has a split brain error, local replication likely failed due to
         # missing common snapshots. Donor discovery will also fail for the same reason. Skip it.
+        : '
         remote_sb=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
         if [[ "$remote_sb" == "true" ]]; then
             echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Skipping donor search because dataset is in a split-brain state."
@@ -1156,7 +1183,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         else
             echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Searching chain for a better donor..."
             SKIP_DONOR_SEARCH=false
-            
+
             if [[ "$IS_DONOR" == true ]]; then
                 echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
                 DONOR_NODE=""
@@ -1170,15 +1197,15 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             donor_user=$(resolve_node_user "$DONOR_NODE" "$raw_filesystem")
             donor_target="${donor_user}@${donor_fqdn}"
 
-            echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ SUCCESS:${C_RESET} Found donor peer '$DONOR_NODE' ($donor_fqdn). Delegating healing of '$hop_node'..."
-            
+            echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ SUCCESS:${C_RESET} Found donor peer '"'"'$DONOR_NODE'"'"' ($donor_fqdn). Delegating healing of '"'"'$hop_node'"'"'..."
+
             donor_opts="--alias $DONOR_NODE --target $hop_node --donor"
             if [[ "$ZEP_BW" == "true" ]]; then donor_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then donor_opts+=" --force-color"; fi
-            
+
             if ssh "$donor_target" "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $donor_opts"; then
                 echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Delegated replication from $DONOR_NODE to $hop_node successful."
-                
+
                 # RETRY local replication now that common ground should exist
                 echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄${C_RESET} Retrying local replication to $hop_node..."
                 if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
@@ -1195,6 +1222,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
             fi
         fi
+        '
     fi
 
     if [[ "$TRANSFER_DONE" == false && "$REPL_POLICY" == "fail" ]]; then
