@@ -250,245 +250,190 @@ zfsbud_core() {
     local local_ds="$filesystem"
     local ssh_t=$(resolve_ssh_timeout "$filesystem")
 
-    # Read debug timeout before any pipeline execution
     local debug_timeout=$(get_zfs_prop "zep:debug:send_timeout" "$local_ds")
     [[ "$debug_timeout" =~ ^[0-9]+[smhdMY]$ ]] && debug_timeout=$(parse_time_to_seconds "$debug_timeout")
     [[ ! "$debug_timeout" =~ ^[0-9]+$ ]] && debug_timeout=""
     local iomon_timeout=""
     [[ "$debug_timeout" =~ ^[0-9]+$ && "$debug_timeout" -gt 0 ]] && iomon_timeout="$debug_timeout"
 
-    # --- RESUME PATH: complete an interrupted transfer ---
-    if [ -n "$resume_token" ]; then
+    # --- Compute global send/recv options ---
+    local use_raw="false"
+    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
+    local use_resume_flag="false"
+    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume_flag="true"
+
+    local send_opt recv_flags transfer_label snap_name=""
+
+    if [[ -n "$resume_token" ]]; then
         local resume_recv_args=""
-        [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F $resume_recv_args"
+        [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F"
+        send_opt="$verbose -t \"$resume_token\""
+        recv_flags="-u $resume_recv_args"
+        transfer_label="resuming"
+    else
+        local latest_line=${source_snapshots[-1]}
+        local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
+        snap_name="${latest_snapshot_source#*@}"
 
-        local prefix=$(get_snap_prefix "$filesystem")
-        local alias_val=${CLI_ALIAS:-$(hostname)}
-        local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
-        local err_log="${REPL_ERR_FILE:?REPL_ERR_FILE not set}"
-
-        > "${lock_path}.cnt"
-
-        if [[ "$dry_run" == true ]]; then
-            zbud_msg "  🔄 [DRY RUN] Would resume send to $remote_ds"
-            return 0
+        local raw_flag="";       [[ "$use_raw" == "true" ]] && raw_flag="-w"
+        local resume_flag="";    [[ "$use_resume_flag" == "true" ]] && resume_flag="-s"
+        local force_flag=""
+        if [[ "$is_initial" == "true" || "$REPL_FORCE" == "true" ]]; then
+            force_flag="-F"
         fi
 
-        local recv_cmd
-        if [ -n "$remote_shell" ]; then
-            recv_cmd="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" | zstd | $remote_shell \"zstd -d | zfs recv -u $resume_recv_args $remote_ds\""
+        if [[ "$is_initial" == "true" ]]; then
+            send_opt="-R -v $raw_flag \"$latest_snapshot_source\""
+            recv_flags="-u -o canmount=noauto -F"
+            transfer_label="initial: $snap_name"
         else
-            recv_cmd="zfs recv -u $resume_recv_args \"$remote_ds\""
+            send_opt="-p -v $recursive_send -i \"$local_ds@$last_snapshot_common\" $raw_flag \"$latest_snapshot_source\""
+            recv_flags="-u -o canmount=noauto $force_flag $resume_flag"
+            transfer_label="incremental: $last_snapshot_common -> $snap_name"
         fi
+    fi
 
-        local zfs_resume_pipeline="zfs send $verbose -t \"$resume_token\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd"
-
-        set -o pipefail
-        eval "$zfs_resume_pipeline"
-        local status=$?
-        set +o pipefail
-
-        if [[ $status -ne 0 ]]; then
-            zbud_msg "Resume pipeline failed with status $status"
-            return $status
-        fi
+    # --- Unified dry run ---
+    if [[ "$dry_run" == true ]]; then
+        zbud_msg "  🚀 [DRY RUN] Would send $transfer_label replication to $remote_ds"
+        [[ "$is_initial" == "true" ]] && last_snapshot_common="$snap_name"
         return 0
     fi
 
-    # Extract snapshot info
-    local latest_line=${source_snapshots[-1]}
-    local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
-    local snap_name="${latest_snapshot_source#*@}"
-
-    # Configure flags based on properties
-    local use_raw="false"
-    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
-
-    local use_resume="false"
-    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume="true"
-
-    # Build send/recv args based on transfer type
-    local send_args recv_args label_msg
-    if [[ "$is_initial" == "true" ]]; then
-      send_args="-R -v"
-      recv_args="-o canmount=noauto"
-      label_msg="initial"
-    else
-      send_args="-p -v $recursive_send -i \"$local_ds@$last_snapshot_common\""
-      recv_args="-o canmount=noauto"
-      label_msg="incremental: $last_snapshot_common -> $snap_name"
-    fi
-
-    [[ "$use_raw" == "true" ]] && send_args="-w $send_args"
-    [[ "$use_resume" == "true" ]] && recv_args="-s $recv_args"
-
-    # Force flag: initial send always uses -F, incremental only if REPL_FORCE
-    if [[ "$is_initial" == "true" ]]; then
-      recv_args="-F $recv_args"
-    elif [[ "$REPL_FORCE" == "true" ]]; then
-      recv_args="-F $recv_args"
-    fi
-
-    # Dry run handling
-    if [[ "$dry_run" == true ]]; then
-      if [[ "$is_initial" == "true" ]]; then
-        zbud_msg "  🚀 [DRY RUN] Would send initial snapshot to $remote_ds: $latest_snapshot_source"
-        last_snapshot_common="$snap_name"
-      else
-        zbud_msg "  ${C_CYAN}🚀 [DRY RUN]${C_RESET} Would send incremental: $last_snapshot_common -> $snap_name to $remote_ds"
-      fi
-      return 0
-    fi
-
-    # Pre-send operations
-    if [[ "$is_initial" == "true" ]]; then
-      zbud_msg "Initial source snapshot (latest): $latest_snapshot_source"
-      zbud_msg "Sending initial snapshot to destination $remote_ds..."
-
-      # FORCE CLEANUP of destination ONLY if --destroy-chain is set
-      if [[ "$DESTROY_CHAIN" == true ]]; then
-        zbud_msg "DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
-        if [ -n "$remote_shell" ]; then
-          $remote_shell -o ConnectTimeout="$ssh_t" "zfs destroy -r $remote_ds 2>/dev/null || true"
-        else
-          zfs destroy -r "$remote_ds" 2>/dev/null || true
-        fi
-      fi
-    else
-      zbud_msg "  ${C_CYAN}🚀${C_RESET} Sending incremental: $last_snapshot_common -> $snap_name to $remote_ds"
-    fi
-
-    # Setup logging
+    # --- Setup ---
     local prefix=$(get_snap_prefix "$filesystem")
     local alias_val=${CLI_ALIAS:-$(hostname)}
     local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
     local err_log="${REPL_ERR_FILE:?REPL_ERR_FILE not set}"
 
-    # Clear stale error log from previous runs or filesystems
+    if [[ "$is_initial" == "true" && "$DESTROY_CHAIN" == true ]]; then
+        zbud_msg "  💥 DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
+        if [[ -n "$remote_shell" ]]; then
+            $remote_shell -o ConnectTimeout="$ssh_t" "zfs destroy -r $remote_ds 2>/dev/null || true"
+        else
+            zfs destroy -r "$remote_ds" 2>/dev/null || true
+        fi
+    fi
+
     > "${lock_path}.cnt"
     > "$err_log"
 
-    # Update lock file with destination info for progress monitoring (incremental only)
-    if [[ "$is_initial" != "true" && -n "$remote_shell" && -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
-      echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
+    if [[ -n "$remote_shell" && -n "$LOCKFILE" && -f "$LOCKFILE" ]]; then
+        echo "$(cat "$LOCKFILE" | awk '{print $1}') $hop_node $remote_ds" > "$LOCKFILE"
     fi
 
-    # Build recv pipeline tail: remote adds mbuffer + zstd + ssh wrapper; local is bare
-    local recv_cmd
-    if [ -n "$remote_shell" ]; then
-      local remote_zfs_recv="zstd -d | zfs recv -u $recv_args $remote_ds"
-      recv_cmd="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"$remote_zfs_recv\" 2>>\"$err_log\""
+    # --- Unified message ---
+    zbud_msg "  🚀 Sending $transfer_label replication to $remote_ds..."
+
+    # --- Build unified pipeline ---
+    local pipeline
+    if [[ -n "$remote_shell" ]]; then
+        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_flags $remote_ds\" 2>>\"$err_log\""
     else
-      recv_cmd="zfs recv -u $recv_args \"$remote_ds\" 2>>\"$err_log\""
+        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | zfs recv $recv_flags \"$remote_ds\" 2>>\"$err_log\""
     fi
 
-    # Build full pipeline command
-    local zfs_send_pipeline="zfs send $send_args \"$latest_snapshot_source\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd"
-
-    # Execute transfer pipeline
+    # --- Execute ---
     local status=0
     set -o pipefail
-    eval "$zfs_send_pipeline"
+    eval "$pipeline"
     status=$?
     set +o pipefail
 
-    # Error handling for incremental transfers
-    if [[ "$is_initial" != "true" && $status -ne 0 ]]; then
-      if [[ -s "$err_log" ]] && grep -q "cannot receive incremental stream" "$err_log" && grep -q "has been modified" "$err_log"; then
-        zbud_msg "  ${C_RED}🚨${C_RESET} Split-brain detected on destination (pipeline rejected modified filesystem)"
-        local hint_msg="${C_BOLD}HINT:${C_RESET}"
-        hint_msg+=" Data divergence (Split-Brain) detected on ${remote_ds}.|${C_CYAN}To realign, rollback to the last common snapshot:${C_RESET}|"
-        hint_msg+="    zfs rollback -r ${remote_ds}@${last_snapshot_common}"
+    # --- Unified error handling ---
+    if [[ $status -ne 0 ]]; then
+        if [[ -s "$err_log" ]] && grep -q "cannot receive incremental stream" "$err_log" && grep -q "has been modified" "$err_log"; then
+            zbud_msg "  ${C_RED}🚨${C_RESET} Split-brain detected on destination (pipeline rejected modified filesystem)"
+            local hint_msg="${C_BOLD}HINT:${C_RESET}"
+            hint_msg+=" Data divergence (Split-Brain) detected on ${remote_ds}.|${C_CYAN}To realign, rollback to the last common snapshot:${C_RESET}|"
+            hint_msg+="    zfs rollback -r ${remote_ds}@${last_snapshot_common:-?}"
 
-        local diff_output=""
-        local diff_status=0
-        if [ -n "$remote_shell" ]; then
-            diff_output=$($remote_shell "zep $remote_ds --divergence-report $last_snapshot_common" 2>&1)
-            diff_status=$?
-        else
-            diff_output=$(divergence_report "$remote_ds" "$last_snapshot_common" 2>&1)
-            diff_status=$?
-        fi
-        [[ -n "$diff_output" ]] && echo "$diff_output" | while IFS= read -r line; do zbud_msg "  |  $line"; done
-
-        if [[ "$REPL_FORCE" == "true" ]]; then
-            zbud_warn "Divergence detected but force=true — retrying with zfs recv -F"
-            local recv_cmd_force
-            if [ -n "$remote_shell" ]; then
-              local remote_zfs_recv="zstd -d | zfs recv -u -F $recv_args $remote_ds"
-              recv_cmd_force="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"$remote_zfs_recv\" 2>>\"$err_log\""
+            local diff_output=""
+            if [[ -n "$remote_shell" ]]; then
+                diff_output=$($remote_shell "zep $remote_ds --divergence-report ${last_snapshot_common:-} 2>&1")
             else
-              recv_cmd_force="zfs recv -u -F $recv_args \"$remote_ds\" 2>>\"$err_log\""
+                diff_output=$(divergence_report "$remote_ds" "${last_snapshot_common:-}" 2>&1)
             fi
-            local zfs_send_retry="zfs send $send_args \"$latest_snapshot_source\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd_force"
-            set -o pipefail
-            eval "$zfs_send_retry"
-            status=$?
-            set +o pipefail
-            if [[ $status -ne 0 ]]; then
-                zbud_msg "Force retry also failed with status $status"
-                if [ -n "$remote_shell" ]; then
-                    $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null
+            [[ -n "$diff_output" ]] && echo "$diff_output" | while IFS= read -r line; do zbud_msg "  |  $line"; done
+
+            if [[ "$REPL_FORCE" == "true" ]]; then
+                zbud_warn "Divergence detected but force=true — retrying with zfs recv -F"
+                local recv_flags_force="${recv_flags/-u /-u -F }"
+                [[ "$recv_flags_force" == "$recv_flags" ]] && recv_flags_force="${recv_flags/u /u -F }"
+
+                local retry_pipeline
+                if [[ -n "$remote_shell" ]]; then
+                    retry_pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_flags_force $remote_ds\" 2>>\"$err_log\""
                 else
-                    zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null
+                    retry_pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | zfs recv $recv_flags_force \"$remote_ds\" 2>>\"$err_log\""
                 fi
-                send_smtp_alert "critical" --detail "Split-Brain on $remote_ds — force retry failed. Manual intervention required."
-                return $status
-            fi
-            zbud_msg "  ${C_BLUE}✅${C_RESET} Force retry succeeded — destination overwritten."
-        else
-            zbud_msg ""
-            while IFS= read -r line; do
-                zbud_msg "    ${line//|/}"
-            done <<< "$(echo -e "${hint_msg//|/\\n}")"
-            zbud_msg ""
-            echo "$hint_msg" > "${REPL_HINT_FILE:?REPL_HINT_FILE not set}"
 
-            if [ -n "$remote_shell" ]; then
-                $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null && \
-                    zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds on destination with split-brain error flag."
+                set -o pipefail
+                eval "$retry_pipeline"
+                status=$?
+                set +o pipefail
+
+                if [[ $status -ne 0 ]]; then
+                    zbud_msg "Force retry also failed with status $status"
+                    if [[ -n "$remote_shell" ]]; then
+                        $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null
+                    else
+                        zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null
+                    fi
+                    send_smtp_alert "critical" --detail "Split-Brain on $remote_ds — force retry failed. Manual intervention required."
+                    return $status
+                fi
+                zbud_msg "  ${C_BLUE}✅${C_RESET} Force retry succeeded — destination overwritten."
             else
-                zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null && \
-                    zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds with split-brain error flag."
-            fi
+                zbud_msg ""
+                while IFS= read -r line; do
+                    zbud_msg "    ${line//|/}"
+                done <<< "$(echo -e "${hint_msg//|/\\n}")"
+                zbud_msg ""
+                echo "$hint_msg" > "${REPL_HINT_FILE:?REPL_HINT_FILE not set}"
 
-            local clean_hint=$(echo -e "${hint_msg//|/\\n}" | sed 's/\x1b\[[0-9;]*m//g')
-            local clean_diff=$(echo -e "$diff_output" | sed 's/\x1b\[[0-9;]*m//g')
-            local plain_alert="CRITICAL: Split-Brain Data Divergence on $remote_ds"
-            plain_alert+=$'\n'
-            plain_alert+="$clean_diff"
-            plain_alert+=$'\n\n'
-            plain_alert+="$clean_hint"
-            send_smtp_alert "critical" "$plain_alert"
-            return 2
+                if [[ -n "$remote_shell" ]]; then
+                    $remote_shell "zfs set zep:error:split-brain=true $remote_ds" 2>/dev/null && \
+                        zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds on destination with split-brain error flag."
+                else
+                    zfs set zep:error:split-brain=true "$remote_ds" 2>/dev/null && \
+                        zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds with split-brain error flag."
+                fi
+
+                local clean_hint=$(echo -e "${hint_msg//|/\\n}" | sed 's/\x1b\[[0-9;]*m//g')
+                local clean_diff=$(echo -e "$diff_output" | sed 's/\x1b\[[0-9;]*m//g')
+                local plain_alert="CRITICAL: Split-Brain Data Divergence on $remote_ds"
+                plain_alert+=$'\n'
+                plain_alert+="$clean_diff"
+                plain_alert+=$'\n\n'
+                plain_alert+="$clean_hint"
+                send_smtp_alert "critical" "$plain_alert"
+                return 2
+            fi
+        elif [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
+            zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
+            status=0
+        else
+            zbud_msg "Pipeline failed with status $status"
+            if [[ -f $err_log ]]; then
+                while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
+            fi
+            return $status
         fi
-      elif [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
-        zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
-        status=0
-      else
-        zbud_msg "Pipeline failed with status $status"
-        if [[ -f $err_log ]]; then
-          while IFS= read -r line; do zbud_msg "  [STDERR] $line"; done < "$err_log"
-        fi
-        return $status
-      fi
     fi
 
-    # Success logging
+    # --- Unified success logging ---
     local iomon_size=$(cat "${lock_path}.cnt" 2>/dev/null | numfmt --to=iec 2>/dev/null || echo 0)
-    local snap_count=$(grep -c "send from" "$err_log" || echo 0)
-    log_message "REPLICATION: Successfully sent $label_msg replication for $local_ds to $remote_ds (snap count: $snap_count, total size: $iomon_size)"
+    log_message "REPLICATION: Successfully sent $transfer_label replication for $local_ds to $remote_ds (total size: $iomon_size)"
 
-    # Debug delay
     local delay=$(get_zfs_prop "zep:debug:send_delay" "$local_ds")
     if [[ "$delay" =~ ^[0-9]+$ && "$delay" -gt 0 ]]; then
-      zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send ($label_msg)..."
-      sleep "$delay"
+        zbud_msg "  🧪 DEBUG: Sleeping for ${delay}s after zfs send ($transfer_label)..."
+        sleep "$delay"
     fi
 
-    # Update common snapshot tracking
     if [[ "$is_initial" == "true" ]]; then
-      last_snapshot_common="$snap_name"
+        last_snapshot_common="$snap_name"
     fi
 
     return $status

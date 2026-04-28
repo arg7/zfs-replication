@@ -1253,7 +1253,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         
         CASCADE_VERIFIED=false
         if [[ "$PROMOTE" == false && "$IS_DONOR" == false ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🔗${C_RESET} Cascading: triggering downstream chain for $local_ds on $HOP_TARGET"
+            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🔗${C_RESET} Cascading: triggering downstream chain for $remote_ds on $HOP_TARGET"
             casc_opts="--alias $hop_node"
             if [[ "$initial_send" == true ]]; then casc_opts+=" --init"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
@@ -1266,7 +1266,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             PROPS_ARG="--sync-props $props_to_pass"
 
             # Cascade downstream through SSH — output flows through directly
-            ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $casc_opts $PROPS_ARG --cascaded"
+            ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $remote_ds $label $keep_fallback $casc_opts $PROPS_ARG --cascaded"
             SSH_STATUS=$?
 
             if [[ $SSH_STATUS -eq 2 ]]; then
