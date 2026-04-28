@@ -175,7 +175,7 @@ for i in $(seq 1 "$NUM_NODES"); do
     fi
     # Start authorized_keys with root's pubkey so master can connect
     # Detect root's actual key type (ed25519, rsa, ecdsa)
-    root_pubkey=""
+    local root_pubkey=""
     for kt in id_ed25519 id_rsa id_ecdsa; do
         if [[ -f "/root/.ssh/${kt}.pub" ]]; then
             root_pubkey="/root/.ssh/${kt}.pub"
@@ -193,8 +193,8 @@ for i in $(seq 1 "$NUM_NODES"); do
     chmod 644 "$ZEP_SSH_DIR/id_rsa.pub" 2>/dev/null || true
 
     # Delegate minimal ZFS permissions for replication
-    # Pool-level: create+mount+canmount needed for zfs recv to create/receive datasets
-    zfs allow "$ZEP_USER" create,mount,canmount "$POOL_NAME"
+    # Pool-level: create+mount needed for zfs recv to create/receive datasets
+    zfs allow "$ZEP_USER" create,mount "$POOL_NAME"
     # Dataset-level: minimal set for send/receive pipeline
     zfs allow "$ZEP_USER" send,receive,snapshot,hold,release,userprop "$DATASET_NAME"
 
