@@ -306,7 +306,7 @@ export REPL_ERR_FILE REPL_HINT_FILE REPL_ALERTS_DIR
 
 # Handle Stats logic (internal: called via ssh by status cmd)
 if [[ "$STATS_MODE" == true ]]; then
-    cmd_stats
+    cmd_stats "$raw_filesystem"
     exit $?
 fi
 

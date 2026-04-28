@@ -3,34 +3,38 @@
 
 cmd_stats() {
     local _alias="${CLI_ALIAS:-}"
+    local _target_fs="${1:-}"
     [[ -z "$_alias" ]] && return 0
 
-    # Find the chain filesystem and determine role from position
-    local _target_fs=""
     local _node_role=""
-    while read -r ds; do
-        chain=$(zfs get -H -o value zep:chain "$ds" 2>/dev/null)
-        [[ -z "$chain" || "$chain" == "-" ]] && continue
-        if echo "$chain" | tr ',' '\n' | grep -qx "$_alias"; then
-            # Determine role: 0=master, last=sink, otherwise=middle
-            IFS=',' read -r -a _nodes <<< "$chain"
-            local _idx=0
-            for _n in "${_nodes[@]}"; do
-                if [[ "$_n" == "$_alias" ]]; then
-                    if [[ $_idx -eq 0 ]]; then _node_role="master"
-                    elif [[ $_idx -eq $((${#_nodes[@]}-1)) ]]; then _node_role="sink"
-                    else _node_role="middle"; fi
-                    break
-                fi
-                _idx=$((_idx+1))
-            done
-            # Get node-specific filesystem
-            local n_fs=$(zfs get -H -o value "zep:node:${_alias}:fs" "$ds" 2>/dev/null)
-            _target_fs="${n_fs:-$ds}"
-            break
-        fi
-    done < <(zfs list -H -o name 2>/dev/null)
+    if [[ -z "$_target_fs" ]]; then
+        # Fallback: scan datasets for chain membership (slow path)
+        while read -r ds; do
+            chain=$(zfs get -H -o value zep:chain "$ds" 2>/dev/null)
+            [[ -z "$chain" || "$chain" == "-" ]] && continue
+            if echo "$chain" | tr ',' '\n' | grep -qx "$_alias"; then
+                _target_fs="${ds}"
+                break
+            fi
+        done < <(zfs list -H -o name 2>/dev/null)
+    fi
     [[ -z "$_target_fs" ]] && return 0
+
+    # Determine role from chain position
+    local chain=$(zfs get -H -o value zep:chain "$_target_fs" 2>/dev/null)
+    if [[ -n "$chain" && "$chain" != "-" ]]; then
+        IFS=',' read -r -a _nodes <<< "$chain"
+        local _idx=0
+        for _n in "${_nodes[@]}"; do
+            if [[ "$_n" == "$_alias" ]]; then
+                if [[ $_idx -eq 0 ]]; then _node_role="master"
+                elif [[ $_idx -eq $((${#_nodes[@]}-1)) ]]; then _node_role="sink"
+                else _node_role="middle"; fi
+                break
+            fi
+            _idx=$((_idx+1))
+        done
+    fi
 
     # Get pool name from target filesystem
     local _pool="${_target_fs%%/*}"

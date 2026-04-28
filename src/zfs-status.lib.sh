@@ -11,9 +11,9 @@ get_node_state() {
     local output
 
     if [[ "$alias" == "$(get_local_alias "$raw_ds" "")" ]]; then
-        output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats 2>/dev/null)
+        output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats "$raw_ds" 2>/dev/null)
     else
-        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "$ZEPLICATOR_CMD --alias $alias --stats" 2>/dev/null)
+        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "$ZEPLICATOR_CMD --alias $alias --stats $raw_ds" 2>/dev/null)
     fi
 
     if [[ -z "$output" ]]; then
