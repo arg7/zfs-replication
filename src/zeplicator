@@ -874,7 +874,6 @@ NEXT_HOP=""
 IS_MASTER=false
 ME_INDEX=-1
 RESOLVED_KEEP=$keep_fallback
-CHAIN_PREFIX=""
 
 if [[ -n "$REPL_CHAIN" ]]; then
     IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
@@ -913,6 +912,8 @@ if [[ -n "$REPL_CHAIN" ]]; then
     if [[ "$CASCADED" == true ]]; then
         # Running as downstream hop — indent one level deeper than upstream
         CHAIN_PREFIX+="  | "
+    else
+        CHAIN_PREFIX=""
     fi
     
     dry_flag=""
@@ -1260,11 +1261,9 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then casc_opts+=" --force-color"; fi
 
             PROPS_ARG=""
-            if [[ "$initial_send" == true ]]; then
-                # Use passed-in props if available (avoids re-calculating and fixes sync in initial runs)
-                props_to_pass="${sync_props_data:-$(get_repl_props_encoded "$local_ds")}"
-                PROPS_ARG="--sync-props $props_to_pass"
-            fi
+            # Pass encoded properties downstream to prefill cache and avoid redundant zfs get traffic
+            props_to_pass="${sync_props_data:-$(get_repl_props_encoded "$local_ds")}"
+            PROPS_ARG="--sync-props $props_to_pass"
 
             # Cascade downstream through SSH — output flows through directly
             ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $casc_opts $PROPS_ARG --cascaded"
