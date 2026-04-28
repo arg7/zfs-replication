@@ -46,6 +46,7 @@ Primary Flags:
 
 Advanced Flags:
   --mark-only       Only perform rotation/cleanup of already shipped snapshots.
+  --rotate          Run snapshot retention rotation for all labels locally (for root cron).
   --destroy-chain   Force a fresh start when promoting if no common ground exists.
   --snap <name>     Specify a literal snapshot name to use for promotion/rollback.
   --apply-props <b> Apply encoded replication properties and exit (internal).
@@ -95,6 +96,7 @@ CONFIG_MODE=false
 config_args=()
 STATUS_MODE=false
 STATS_MODE=false
+ROTATE_MODE=false
 
 CLI_ALIAS=""
 
@@ -124,6 +126,7 @@ while [[ $# -gt 0 ]]; do
         --snap-list) VIRTUAL_SNAPS_INCOMING="$2"; shift 2 ;;
         --status) STATUS_MODE=true; shift ;;
         --stats) STATS_MODE=true; shift ;;
+        --rotate) ROTATE_MODE=true; shift ;;
         --show-configured-only) STATUS_CONFIGURED_ONLY=true; shift ;;
         --config) 
             CONFIG_MODE=true
@@ -293,6 +296,52 @@ fi
 if [[ "$STATUS_MODE" == true ]]; then
     cmd_status "$raw_filesystem" "$STATUS_CONFIGURED_ONLY"
     exit $?
+fi
+
+# Handle Rotation logic (cron-safe: run as root on any node)
+if [[ "$ROTATE_MODE" == true ]]; then
+    my_hostname=$(get_local_alias "$raw_filesystem" "$CLI_ALIAS")
+    local_ds="$raw_filesystem"
+    configured_ds=$(get_zfs_prop "zep:node:${my_hostname}:fs" "$raw_filesystem")
+    [[ -n "$configured_ds" && "$configured_ds" != "-" ]] && local_ds="$configured_ds"
+    filesystem="$local_ds"
+
+    REPL_CHAIN=$(get_zfs_prop "zep:chain" "$filesystem")
+    prefix=$(get_snap_prefix "$filesystem")
+
+    # Determine role index for retention resolution
+    ME="$my_hostname"
+    if [[ -n "$REPL_CHAIN" ]]; then
+        IFS=',' read -r -a nodes <<< "$REPL_CHAIN"
+        for idx in "${!nodes[@]}"; do
+            [[ "${nodes[$idx]}" == "$ME" ]] && { ME_INDEX=$idx; break; }
+        done
+    fi
+
+    echo -e "${C_CYAN}🔄${C_RESET} Rotation for $filesystem (node: $ME, role: ${ME_INDEX:+$([ $ME_INDEX -eq 0 ] && echo master || ([ $ME_INDEX -eq $((${#nodes[@]} - 1)) ] && echo sink || echo middle))})"
+
+    # Collect labels from snapshots
+    declare -A seen_labels
+    while read -r snap; do
+        [[ -z "$snap" ]] && continue
+        label="${snap#${prefix}}"
+        label="${label%%-*}"
+        [[ -z "$label" ]] && continue
+        seen_labels["$label"]=1
+    done < <(zfs list -t snap -H -o name -r "$local_ds" 2>/dev/null | grep "@${prefix}" | cut -d'@' -f2)
+
+    if [[ ${#seen_labels[@]} -eq 0 ]]; then
+        echo "  No snapshots found with prefix '${prefix}'. Nothing to rotate."
+        exit 0
+    fi
+
+    for lbl in "${!seen_labels[@]}"; do
+        keep=$(resolve_retention "$local_ds" "$lbl" "$keep_fallback")
+        purge_shipped_snapshots "$local_ds" "$lbl" "$keep"
+    done
+
+    echo -e "${C_GREEN}✅${C_RESET} Rotation complete."
+    exit 0
 fi
 
 # Setup cleanup trap (after stats/status exits, so it doesn't fire for them)
