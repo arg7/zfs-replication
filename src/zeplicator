@@ -104,6 +104,7 @@ DIV_MODE=false
 DIV_COMMON=""
 
 CLI_ALIAS=""
+ORIGINAL_ARGS="$@"
 
 # Parse arguments
 positional_args=()
@@ -157,6 +158,18 @@ init_colors
 if [[ ${#positional_args[@]} -gt 0 ]]; then raw_filesystem="${positional_args[0]}"; fi
 if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
 if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
+
+# Set log command tag for per-mode log file names
+if [[ "$STATS_MODE" == true ]]; then REPL_LOG_CMD="stats"
+elif [[ "$STATUS_MODE" == true ]]; then REPL_LOG_CMD="status"
+elif [[ "$ROTATE_MODE" == true ]]; then REPL_LOG_CMD="rotate"
+elif [[ "$CONFIG_MODE" == true ]]; then REPL_LOG_CMD="config"
+elif [[ "$DIV_MODE" == true ]]; then REPL_LOG_CMD="diverge"
+else REPL_LOG_CMD="replicate"
+fi
+
+trap 'log_message "INFO: exit_code=$?"' EXIT
+log_message "INFO: start: $0 $ORIGINAL_ARGS"
 
 # --- Pre-flight argument validation ---
 validate_args() {
@@ -1115,8 +1128,8 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
 
     remote_ds=$(resolve_node_filesystem "$hop_node" "$raw_filesystem")
 
-    # Check if destination is currently in split-brain state
-    PRE_REPL_SB=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
+    # Check if local dataset was previously in split-brain state
+    PRE_REPL_SB=$(zfs get -H -o value zep:error:split-brain "$local_ds" 2>/dev/null)
 
     echo -e "${CHAIN_PREFIX}  ${C_CYAN}🚀${C_RESET} Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
 
@@ -1137,24 +1150,28 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
 
         # Check if it was previously in split-brain state
         if [[ "$PRE_REPL_SB" == "true" ]]; then
-            zbud_warn "Split-Brain condition resolved on $hop_node ($remote_ds). Clearing error flag."
-            send_smtp_alert "warning" "NOTICE: Split-Brain condition on $remote_ds at $hop_node has been successfully resolved. The replication succeeded and the error flag is being cleared."
+            zbud_warn "Split-Brain condition resolved on $local_ds. Clearing error flag."
+            send_smtp_alert "warning" "NOTICE: Split-Brain condition on $local_ds has been successfully resolved. The replication succeeded and the error flag is being cleared."
         fi
 
-        # Clear any stale split-brain error flag
-        ssh "$HOP_TARGET" "zfs inherit zep:error:split-brain $remote_ds" 2>/dev/null
+        # Clear any stale split-brain error flag locally
+        zfs inherit zep:error:split-brain "$local_ds" 2>/dev/null && \
+            zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Cleared split-brain error flag on $local_ds."
         TRANSFER_DONE=true
     elif [[ $ZBUD_STATUS -eq 2 ]]; then
         HAD_SPLIT_BRAIN=true
         
         # Mark the destination with the split-brain error flag
-        if ! ssh "$HOP_TARGET" "zfs set zep:error:split-brain=true $remote_ds"; then
+        if ssh "$HOP_TARGET" "zfs set zep:error:split-brain=true $remote_ds"; then
+            zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Marked $remote_ds on $hop_node with split-brain error flag."
+        else
             send_smtp_alert "critical" "CRITICAL: Failed to set zep:error:split-brain property on $HOP_TARGET for $remote_ds"
         fi
         
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
-                die "Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2 --detail
+                zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Split-Brain detected on $hop_node. Aborting replication job."
+                exit 2
             fi
             echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
 
@@ -1165,7 +1182,8 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             TRANSFER_DONE=false
             continue
         else
-            die "Split-Brain detected on $hop_node. Aborting entire replication job for safety." 2 --detail
+            zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Split-Brain detected on $hop_node. Aborting replication job."
+            exit 2
         fi
     elif [[ $ZBUD_STATUS -eq 3 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
@@ -1187,7 +1205,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         : '
         remote_sb=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
         if [[ "$remote_sb" == "true" ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Skipping donor search because dataset is in a split-brain state."
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Skipping donor search because local dataset is in a split-brain state."
             DONOR_NODE=""
             SKIP_DONOR_SEARCH=true
         else

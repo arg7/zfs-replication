@@ -26,13 +26,6 @@ find_best_donor() {
         local donor_user=$(resolve_node_user "$donor_alias" "$ds_raw")
         local donor_target="${donor_user}@${donor_fqdn}"
 
-        # Check connectivity to potential donor
-        log_message "  Testing connectivity to $donor_target..."
-        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "$donor_target" "true" 2>/dev/null; then 
-            log_message "  ❌ $donor_alias unreachable via SSH."
-            continue 
-        fi
-        
         local donor_pool=$(resolve_node_pool "$donor_alias" "$ds_raw")
         local ds_on_donor="${donor_pool}/${ds_raw#*/}"
         if [[ "$donor_pool" == *"/"* ]]; then ds_on_donor="$donor_pool"; fi
@@ -321,7 +314,7 @@ zfsbud_core() {
       recv_args="-o canmount=noauto"
       label_msg="initial"
     else
-      send_args="-p $recursive_send -i \"$local_ds@$last_snapshot_common\" -v"
+      send_args="-p -v $recursive_send -i \"$local_ds@$last_snapshot_common\""
       recv_args="-o canmount=noauto"
       label_msg="incremental: $last_snapshot_common -> $snap_name"
     fi
@@ -401,7 +394,62 @@ zfsbud_core() {
 
     # Error handling for incremental transfers
     if [[ "$is_initial" != "true" && $status -ne 0 ]]; then
-      if [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
+      if [[ -s "$err_log" ]] && grep -q "cannot receive incremental stream" "$err_log" && grep -q "has been modified" "$err_log"; then
+        zbud_msg "  ${C_RED}🚨${C_RESET} Split-brain detected on destination (pipeline rejected modified filesystem)"
+        local hint_msg="${C_BOLD}HINT:${C_RESET}"
+        hint_msg+=" Data divergence (Split-Brain) detected on ${remote_ds}.|${C_CYAN}To realign, rollback to the last common snapshot:${C_RESET}|"
+        hint_msg+="    zfs rollback -r ${remote_ds}@${last_snapshot_common}"
+
+        local diff_output=""
+        local diff_status=0
+        if [ -n "$remote_shell" ]; then
+            diff_output=$($remote_shell "zep $remote_ds --divergence-report $last_snapshot_common" 2>&1)
+            diff_status=$?
+        else
+            diff_output=$(divergence_report "$remote_ds" "$last_snapshot_common" 2>&1)
+            diff_status=$?
+        fi
+        [[ -n "$diff_output" ]] && echo "$diff_output" | while IFS= read -r line; do zbud_msg "  |  $line"; done
+
+        if [[ "$REPL_FORCE" == "true" ]]; then
+            zbud_warn "Divergence detected but force=true — retrying with zfs recv -F"
+            local recv_cmd_force
+            if [ -n "$remote_shell" ]; then
+              local remote_zfs_recv="zstd -d | zfs recv -u -F $recv_args $remote_ds"
+              recv_cmd_force="mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"$remote_zfs_recv\" 2>>\"$err_log\""
+            else
+              recv_cmd_force="zfs recv -u -F $recv_args \"$remote_ds\" 2>>\"$err_log\""
+            fi
+            local zfs_send_retry="zfs send $send_args \"$latest_snapshot_source\" 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | $recv_cmd_force"
+            set -o pipefail
+            eval "$zfs_send_retry"
+            status=$?
+            set +o pipefail
+            if [[ $status -ne 0 ]]; then
+                zbud_msg "Force retry also failed with status $status"
+                send_smtp_alert "critical" --detail "Split-Brain on $remote_ds — force retry failed. Manual intervention required."
+                return $status
+            fi
+            zbud_msg "  ${C_BLUE}✅${C_RESET} Force retry succeeded — destination overwritten."
+        else
+            zbud_msg ""
+            while IFS= read -r line; do
+                zbud_msg "    ${line//|/}"
+            done <<< "$(echo -e "${hint_msg//|/\\n}")"
+            zbud_msg ""
+            echo "$hint_msg" > "${REPL_HINT_FILE:?REPL_HINT_FILE not set}"
+
+            local clean_hint=$(echo -e "${hint_msg//|/\\n}" | sed 's/\x1b\[[0-9;]*m//g')
+            local clean_diff=$(echo -e "$diff_output" | sed 's/\x1b\[[0-9;]*m//g')
+            local plain_alert="CRITICAL: Split-Brain Data Divergence on $remote_ds"
+            plain_alert+=$'\n'
+            plain_alert+="$clean_diff"
+            plain_alert+=$'\n\n'
+            plain_alert+="$clean_hint"
+            send_smtp_alert "critical" "$plain_alert"
+            return 2
+        fi
+      elif [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
         zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
         status=0
       else
@@ -496,80 +544,19 @@ zfsbud_core() {
           return 1
        fi
     else
-       # CHECK DATA DIVERGENCE (Split-Brain Safety Check)
+        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
+        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
+            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@})."
+        fi
 
-       local diff_output=""
-       local diff_status=0
+        # Already up to date check
+        local latest_src_snap=$(echo "${source_snapshots[-1]}" | awk '{print $1}')
+        if [[ "$latest_src_snap" == *"$last_snapshot_common" ]]; then
+            zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
+            return 0
+        fi
 
-       if [ -n "$remote_shell" ]; then
-           diff_output=$($remote_shell "zep $remote_ds --divergence-report $last_snapshot_common" 2>&1)
-           diff_status=$?
-       else
-           divergence_report "$remote_ds" "$last_snapshot_common" 2>&1
-           diff_status=$?
-       fi
-
-       if [[ $diff_status -eq 2 ]]; then
-           # Get offending snapshots if any, to include in the alert
-           local offending_snaps=""
-
-           # Generate rollback hint
-           local hint_msg="${C_BOLD}HINT:${C_RESET}|HINT_NL|"
-           hint_msg+="  Data divergence (Split-Brain) detected on ${hop_node:-destination} ${remote_ds} filesystem.|HINT_NL|"
-           hint_msg+="  To realign the affected node without destroying the rest of the chain,|HINT_NL|"
-           hint_msg+="  log into ${hop_node:-the destination node} and manually rollback its filesystem to the last common snapshot:|HINT_NL|"
-           hint_msg+="    zfs rollback -r ${remote_ds}@${last_snapshot_common}"
-
-           if [[ "$REPL_FORCE" == "true" ]]; then
-               # Force mode: send alert but continue — zfs recv -F will overwrite divergent data
-               zbud_warn "Divergence detected but force=true — overwriting destination with zfs recv -F."
-               zbud_msg "  ${C_RED}🚨${C_RESET} Divergence report:"
-               while IFS= read -r line; do zbud_msg "    $line"; done <<< "$diff_output"
-
-               local alert_body
-               alert_body="WARNING: Split-Brain Data Divergence on $remote_ds — force mode enabled.
-Destination will be overwritten to match source.
-
-$diff_output"
-               send_smtp_alert "critical" --detail "$alert_body"
-           else
-               # No force: abort
-               zbud_msg "  ${C_RED}🚨${C_RESET} Divergence report:"
-               while IFS= read -r line; do zbud_msg "    $line"; done <<< "$diff_output"
-               zbud_msg "    --- "
-
-               # Print hint directly where it happened
-               while IFS= read -r line; do
-                   zbud_msg "      ${line//|HINT_NL|/}"
-               done <<< "$(echo -e "${hint_msg//|HINT_NL|/\\n}")"
-               zbud_msg ""
-
-               echo "$hint_msg" > "${REPL_HINT_FILE:?REPL_HINT_FILE not set}"
-
-               local alert_msg="CRITICAL: Split-Brain Data Divergence on $remote_ds\n$diff_output"
-               alert_msg+="\n\n${hint_msg//|HINT_NL|/\\n}"
-               echo -e "$alert_msg" > "${REPL_ERR_FILE:?REPL_ERR_FILE not set}"
-               return 2
-           fi
-       fi
-
-       # RESOLVE SNAPSHOT DIVERGENCE:
-       # If there are newer snapshots on destination but NO data divergence was detected above,
-       # it means these snapshots are just points on the same timeline (e.g. auto-snapshots).
-
-       local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
-       if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
-           zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@}), but no data divergence."
-       fi
-
-       # Check if already up to date (source latest == dest latest common)
-       local latest_src_snap=$(echo "${source_snapshots[-1]}" | awk '{print $1}')
-       if [[ "$latest_src_snap" == *"$last_snapshot_common" ]]; then
-           zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
-           return 0
-       fi
-
-       send_snapshot "$remote_ds" "false" || return $?
+        send_snapshot "$remote_ds" "false" || return $?
     fi
   done
   return 0

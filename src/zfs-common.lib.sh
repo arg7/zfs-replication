@@ -202,7 +202,9 @@ log_message() {
     local msg="$1"
     local alias=${CLI_ALIAS:-$(hostname)}
     local prefix=${REPL_SNAP_PREFIX:-zep_}
-    local log_file="/tmp/${prefix}${alias}.log"
+    local uid=${REPL_LOG_UID:-$(id -u)}
+    local cmd=${REPL_LOG_CMD:-zep}
+    local log_file="/tmp/${prefix}${cmd}-${alias}-${uid}.log"
     # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes
     local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
     if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
@@ -249,13 +251,6 @@ resolve_node_pool() {
     local fqdn=$(resolve_node_fqdn "$alias" "$ds_raw")
     local user=$(resolve_node_user "$alias" "$ds_raw")
     local ssh_t=$(resolve_ssh_timeout "$ds_raw")
-
-    # Pre-flight check: Is node reachable?
-    if [[ "$alias" != "$my_alias" ]]; then
-        if ! ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "true" 2>/dev/null; then
-            return 255
-        fi
-    fi
 
     # Try local property first (Master has the full config)
     pool=$(get_zfs_prop "zep:node:${alias}:fs" "$ds_raw")
@@ -398,7 +393,9 @@ zbud_msg() {
     echo -e "$msg" 1>&2
     local alias=${CLI_ALIAS:-$(hostname)}
     local prefix=${REPL_SNAP_PREFIX:-zep_}
-    local log_file="/tmp/${prefix}${alias}.log"
+    local uid=${REPL_LOG_UID:-$(id -u)}
+    local cmd=${REPL_LOG_CMD:-zep}
+    local log_file="/tmp/${prefix}${cmd}-${alias}-${uid}.log"
     # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes from the message
     local clean_msg=$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
     if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
