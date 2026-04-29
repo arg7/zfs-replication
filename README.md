@@ -72,9 +72,8 @@ The following packages must be installed on all nodes:
 | `zep:role:<role>:keep:<label>` | Role-based retention (`master`, `middle`, `sink`). | `zep:role:sink:keep:min1=90` |
 | `zep:user` | **(Global)** Fallback SSH user. | `root` |
 | `zep:snap_prefix` | Prefix for snapshots. | `zep_` |
-| `zep:zfs:raw` | Whether to use `zfs send -w` (raw, includes properties). Default: `false`. | `true` |
-| `zep:zfs:resume` | Whether to use `zfs recv -s` (resume support). Default: `false`. | `true` |
-| `zep:zfs:force` | If `false`, omits `-F` from `zfs receive` (Safe Mode). Default: `true`. | `false` |
+| `zep:zfs:send_opt` | Extra flags passed to `zfs send` (e.g. `-w`, `-R`). Default: none. | `-w` |
+| `zep:zfs:recv_opt` | Extra flags passed to `zfs recv` (e.g. `-s`, `-F`). Default: `-F`. | `-s` |
 | `zep:policy` | Replication policy: `fail` (abort on any error) or `resilience` (skip unreachable/split-brain nodes and continue chain). Default: `fail`. | `resilience` |
 | `zep:ssh:timeout` | SSH connection timeout in seconds. Default: `10`. | `30` |
 | `zep:proc:timeout` | Total process/transfer timeout in seconds. Default: `3600`. | `7200` |

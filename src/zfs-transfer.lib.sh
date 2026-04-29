@@ -256,39 +256,26 @@ zfsbud_core() {
     local iomon_timeout=""
     [[ "$debug_timeout" =~ ^[0-9]+$ && "$debug_timeout" -gt 0 ]] && iomon_timeout="$debug_timeout"
 
-    # --- Compute global send/recv options ---
-    local use_raw="false"
-    [[ "$(get_zfs_prop "zep:zfs:raw" "$local_ds")" == "true" ]] && use_raw="true"
-    local use_resume_flag="false"
-    [[ "$(get_zfs_prop "zep:zfs:resume" "$local_ds")" == "true" ]] && use_resume_flag="true"
-
-    local send_opt recv_flags transfer_label snap_name=""
+    # --- Compute send/recv options ---
+    local send_opt recv_opt transfer_label snap_name=""
+    local send_extra=$(get_zfs_prop "zep:zfs:send_opt" "$local_ds")
+    local recv_extra=$(get_zfs_prop "zep:zfs:recv_opt" "$local_ds")
 
     if [[ -n "$resume_token" ]]; then
-        local resume_recv_args=""
-        [[ "$REPL_FORCE" == "true" ]] && resume_recv_args="-F"
-        send_opt="$verbose -t \"$resume_token\""
-        recv_flags="-u $resume_recv_args"
+        send_opt="-v${send_extra:+ $send_extra} -t \"$resume_token\""
+        recv_opt="-u${recv_extra:+ $recv_extra}"
         transfer_label="resuming"
     else
         local latest_line=${source_snapshots[-1]}
         local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
         snap_name="${latest_snapshot_source#*@}"
-
-        local raw_flag="";       [[ "$use_raw" == "true" ]] && raw_flag="-w"
-        local resume_flag="";    [[ "$use_resume_flag" == "true" ]] && resume_flag="-s"
-        local force_flag=""
-        if [[ "$is_initial" == "true" || "$REPL_FORCE" == "true" ]]; then
-            force_flag="-F"
-        fi
+        recv_opt="-u -o canmount=noauto${recv_extra:+ $recv_extra}"
 
         if [[ "$is_initial" == "true" ]]; then
-            send_opt="-R -v $raw_flag \"$latest_snapshot_source\""
-            recv_flags="-u -o canmount=noauto -F"
+            send_opt="-v $recursive_send${send_extra:+ $send_extra} \"$latest_snapshot_source\""
             transfer_label="initial: $snap_name"
         else
-            send_opt="-p -v $recursive_send -i \"$local_ds@$last_snapshot_common\" $raw_flag \"$latest_snapshot_source\""
-            recv_flags="-u -o canmount=noauto $force_flag $resume_flag"
+            send_opt="-v $recursive_send -i \"$local_ds@$last_snapshot_common\"${send_extra:+ $send_extra} \"$latest_snapshot_source\""
             transfer_label="incremental: $last_snapshot_common -> $snap_name"
         fi
     fi
@@ -328,9 +315,9 @@ zfsbud_core() {
     # --- Build unified pipeline ---
     local pipeline
     if [[ -n "$remote_shell" ]]; then
-        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_flags $remote_ds\" 2>>\"$err_log\""
+        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_opt $remote_ds\" 2>>\"$err_log\""
     else
-        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | zfs recv $recv_flags \"$remote_ds\" 2>>\"$err_log\""
+        pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout | zfs recv $recv_opt \"$remote_ds\" 2>>\"$err_log\""
     fi
 
     # --- Execute ---
@@ -428,9 +415,6 @@ zfsbud_core() {
     fi
     
     zbud_msg "  ${C_BLUE}📦${C_RESET} Processing $local_ds -> ${destination_parent_filesystem} (Target: ${remote_ds})"
-    
-    REPL_FORCE=$(get_zfs_prop "zep:zfs:force" "$filesystem")
-    [[ "$initial" == "1" ]] && REPL_FORCE="true"
 
     # Resolve Throttling and Buffering
     local throttle=$(get_zfs_prop "zep:throttle" "$filesystem")

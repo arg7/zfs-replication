@@ -23,14 +23,14 @@ Zeplicator is a modular ZFS replication manager designed for peer-to-peer donor 
 - If you manually paste code into `zeplicator`, the standalone will end up with **multiple definitions** of the same functions, leading to silent failures where your changes are ignored because an earlier or later definition takes precedence.
 
 ### 2. Property Resolution (`get_zfs_prop`)
-- `get_zfs_prop` returns `-` if a property is not set. 
-- **Safety Check**: Always check for `false` explicitly. For example:
+- `get_zfs_prop` returns the DEFAULTS value if a property is not set. 
+- Send/receive flags live in two user-configurable string properties:
   ```bash
-  FORCE=$(get_zfs_prop "zep:zfs:force" "$ds")
-  if [[ "$FORCE" != "false" ]]; then
-     # Default behavior is ON if property is missing or set to anything but 'false'
-  fi
+  local send_extra=$(get_zfs_prop "zep:zfs:send_opt" "$ds")
+  local recv_extra=$(get_zfs_prop "zep:zfs:recv_opt" "$ds")
+  # DEFAULTS: send_opt=""  recv_opt="-F"
   ```
+  These are injected directly into the pipeline — no boolean-to-flag translation needed.
 
 ### 3. IO Monitoring (`iomon`)
 - All `zfs send | zfs recv` pipelines MUST include `iomon` for progress tracking.

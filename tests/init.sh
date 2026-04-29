@@ -72,9 +72,6 @@ ZEP_BIN=$(command -v zep)
 # ZEP Properties from conf or defaults
 CHAIN=$(seq 1 "$NUM_NODES" | sed 's/^/node/' | paste -sd, -)
 POLICY=${POLICY:-fail}
-ZFS_FORCE=${ZFS_FORCE:-false}
-ZFS_RAW=${ZFS_RAW:-false}
-ZFS_RESUME=${ZFS_RESUME:-false}
 ZFS_RATE=${ZFS_RATE:-1M}
 ALERT_CRITICAL_THRESHOLD=${ALERT_CRITICAL_THRESHOLD:-0}
 ALERT_WARN_THRESHOLD=${ALERT_WARN_THRESHOLD:-0}
@@ -86,7 +83,6 @@ echo "Generating $CONFIG_FILE..."
 cat <<EOF > "$CONFIG_FILE"
 chain=$CHAIN
 debug:send_delay=0
-force=true
 policy=$POLICY
 role:master:keep:min1=10
 role:middle:keep:min1=30
@@ -104,9 +100,7 @@ alert:warn:threshold=$ALERT_WARN_THRESHOLD
 alert:info:threshold=$ALERT_INFO_THRESHOLD
 suspend=false
 user=root
-zfs:force=$ZFS_FORCE
-zfs:raw=$ZFS_RAW
-zfs:resume=$ZFS_RESUME
+zfs:send_opt=-p
 zfs:throttle=$ZFS_THROTTLE
 EOF
 
