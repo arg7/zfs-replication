@@ -3,6 +3,9 @@
 # zeplicator - Modular ZFS Replication Manager
 # Main orchestrator script
 
+# Ensure /tmp files are readable by other users (e.g. zep-user-X for status tracking)
+umask 022
+
 ZEPLICATOR_CMD="$(readlink -f "$0")"
 LIB_DIR=$(dirname "$ZEPLICATOR_CMD")
 

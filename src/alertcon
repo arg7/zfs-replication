@@ -7,6 +7,9 @@ import logging
 import re
 from datetime import datetime
 
+# Global alert counter — increments per alert during this session
+alert_counter = 1
+
 class ColorStrippingFormatter(logging.Formatter):
     """Strips ANSI escape sequences (colors) from log messages."""
     ANSI_ESCAPE = re.compile(r'\x1b\[[0-9;]*[mK]')
@@ -16,37 +19,39 @@ class ColorStrippingFormatter(logging.Formatter):
         return self.ANSI_ESCAPE.sub('', message)
 
 def handle_client(conn, addr, show_mail_only, use_color):
+    global alert_counter
+
     if not show_mail_only:
         logging.info(f"--- Connection from {addr} ---")
-    
+
     def send(msg):
         conn.sendall(msg.encode() + b"\r\n")
 
     send("220 Debug SMTP Server")
-    
+
     in_data = False
     data_buffer = ""
-    
+
     C_BOLD = "\033[1m" if use_color else ""
     C_RESET = "\033[0m" if use_color else ""
-    
+
     # Read line by line for commands
     f = conn.makefile('rb')
-    
+
     while True:
         try:
             line_raw = f.readline()
             if not line_raw: break
             line = line_raw.decode('utf-8', errors='ignore').strip()
-            
+
             if not in_data:
                 if not line: continue
                 if not show_mail_only:
                     logging.info(f"C: {line}")
-                
+
                 parts = line.split()
                 cmd = parts[0].upper()
-                
+
                 if cmd in ("EHLO", "HELO"):
                     send("250-localhost\r\n250-AUTH LOGIN PLAIN\r\n250 HELP")
                 elif cmd == "AUTH":
@@ -70,14 +75,16 @@ def handle_client(conn, addr, show_mail_only, use_color):
                         if d_line == ".\r\n":
                             break
                         data_buffer += d_line
-                    
+
                     # Process Payload
-                    logging.info(f"{C_BOLD}--- MAIL CONTENT ---{C_RESET}")
+                    aid = alert_counter
+                    alert_counter += 1
+                    logging.info(f"{C_BOLD}--- ALERT ({aid}) ---{C_RESET}")
                     payload = data_buffer
                     headers_part, sep, body_part = payload.partition("\n\n")
                     if not sep: # Try Windows line endings
                         headers_part, sep, body_part = payload.partition("\r\n\r\n")
-                    
+
                     for h_line in headers_part.splitlines():
                         if ":" in h_line:
                             h_parts = h_line.split(":", 1)
@@ -90,12 +97,12 @@ def handle_client(conn, addr, show_mail_only, use_color):
                                 logging.info(h_line)
                         else:
                             logging.info(h_line)
-                    
+
                     if sep:
                         logging.info("|")
                         for b_line in body_part.splitlines():
                             logging.info(f"| {C_BOLD}{b_line}{C_RESET}")
-                    
+
                     logging.info(f"{C_BOLD}--------------------{C_RESET}\n")
                     send("250 OK: queued as 12345")
                     in_data = False
@@ -104,10 +111,10 @@ def handle_client(conn, addr, show_mail_only, use_color):
                     break
                 else:
                     send("250 OK")
-            
+
         except (ConnectionResetError, BrokenPipeError):
             break
-            
+
     if not show_mail_only:
         logging.info(f"--- Connection closed by {addr} ---\n")
 
@@ -119,21 +126,22 @@ def show_logs(log_file, filter_arg, oneline, grep_pattern=None):
     with open(log_file, 'r') as f:
         content = f.read()
 
-    # Split by the start delimiter with timestamp
-    # Format: 2026-04-26 12:34:56,789 --- MAIL CONTENT ---
-    pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) --- MAIL CONTENT ---'
+    # Split by the alert delimiter with ID
+    # Format: 2026-04-26 12:34:56,789 --- ALERT (1) ---
+    pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) --- ALERT \((\d+)\) ---'
     parts = re.split(pattern, content)
-    
+
     parsed_emails = []
-    # parts[0] is garbage before first mail
-    for i in range(1, len(parts), 2):
+    # parts[0] is garbage before first alert
+    for i in range(1, len(parts), 3):
         timestamp = parts[i]
-        body = parts[i+1]
-        
+        alert_id = int(parts[i+1])
+        body = parts[i+2]
+
         # Split body into mail content and other potential log noise
         mail_parts = body.split('--------------------', 1)
         mail_content = mail_parts[0]
-        
+
         # Strip timestamps from each line to find headers
         subject = "No Subject"
         for line in mail_content.splitlines():
@@ -142,31 +150,26 @@ def show_logs(log_file, filter_arg, oneline, grep_pattern=None):
             if clean_line.lower().startswith("subject:"):
                 subject = clean_line.split(":", 1)[1].strip()
                 break
-                
+
         parsed_emails.append({
             'timestamp': timestamp,
+            'alert_id': alert_id,
             'subject': subject,
-            'full': f"{timestamp} --- MAIL CONTENT ---{mail_content}--------------------"
+            'full': f"{timestamp} --- ALERT ({alert_id}) ---{mail_content}--------------------"
         })
 
     if not parsed_emails:
-        print("No emails found in log.")
+        print("No alerts found in log.")
         return
-
-    # Newest first
-    parsed_emails.reverse()
 
     # Apply grep filter if provided
     if grep_pattern:
         filtered = []
         try:
             regex = re.compile(grep_pattern, re.IGNORECASE)
-            for i, email in enumerate(parsed_emails):
-                # If oneline, match against subject, otherwise full content
+            for email in parsed_emails:
                 search_target = email['subject'] if oneline else email['full']
                 if regex.search(search_target):
-                    # Keep track of original relative position for the label
-                    email['_orig_idx'] = i
                     filtered.append(email)
             parsed_emails = filtered
         except re.error as e:
@@ -191,38 +194,174 @@ def show_logs(log_file, filter_arg, oneline, grep_pattern=None):
     for idx in indices:
         if idx < len(parsed_emails):
             email = parsed_emails[idx]
-            # Use original index for relative position label if grep was used
-            orig_idx = email.get('_orig_idx', idx)
-            label = 0 if orig_idx == 0 else -orig_idx
+            aid = email['alert_id']
             if oneline:
-                print(f"({label:>4}) {email['timestamp']} {email['subject']}")
+                print(f"({aid:>4}) {email['timestamp']} {email['subject']}")
             else:
-                print(f"--- Position: {label} ---")
+                print(f"--- ALERT ({aid}) ---")
                 print(email['full'])
                 print()
 
+def show_by_id(log_file, id_filter, oneline):
+    """Show alerts by alert ID (not position index)."""
+    if not os.path.exists(log_file):
+        print(f"Log file {log_file} not found.")
+        return
+
+    with open(log_file, 'r') as f:
+        content = f.read()
+
+    # Split by the alert delimiter with ID
+    pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) --- ALERT \((\d+)\) ---'
+    parts = re.split(pattern, content)
+
+    parsed_emails = {}
+    # parts[0] is garbage before first alert
+    for i in range(1, len(parts), 3):
+        timestamp = parts[i]
+        alert_id = int(parts[i+1])
+        body = parts[i+2]
+
+        mail_parts = body.split('--------------------', 1)
+        mail_content = mail_parts[0]
+
+        subject = "No Subject"
+        for line in mail_content.splitlines():
+            clean_line = re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s+', '', line).strip()
+            if clean_line.lower().startswith("subject:"):
+                subject = clean_line.split(":", 1)[1].strip()
+                break
+
+        parsed_emails[alert_id] = {
+            'timestamp': timestamp,
+            'alert_id': alert_id,
+            'subject': subject,
+            'full': f"{timestamp} --- ALERT ({alert_id}) ---{mail_content}--------------------"
+        }
+
+    if not parsed_emails:
+        print("No alerts found in log.")
+        return
+
+    # Parse ID filter: single ID or range (e.g. "1" or "1-5")
+    target_ids = set()
+    try:
+        if '-' in id_filter and not id_filter.startswith('-'):
+            start_str, end_str = id_filter.split('-')
+            start = int(start_str)
+            end = int(end_str)
+            target_ids = set(range(min(start, end), max(start, end) + 1))
+        else:
+            target_ids = {int(id_filter)}
+    except ValueError:
+        print(f"Invalid ID: {id_filter}. Use a number (5) or range (1-10).")
+        return
+
+    for aid in sorted(target_ids):
+        if aid in parsed_emails:
+            email = parsed_emails[aid]
+            if oneline:
+                print(f"({aid:>4}) {email['timestamp']} {email['subject']}")
+            else:
+                print(f"--- ALERT ({aid}) ---")
+                print(email['full'])
+                print()
+
+    missing = target_ids - set(parsed_emails.keys())
+    if missing:
+        print(f"Alerts not found: {', '.join(str(a) for a in sorted(missing))}")
+
+def show_count(log_file):
+    """Print the number of alerts in the log."""
+    if not os.path.exists(log_file):
+        print("0")
+        return
+
+    with open(log_file, 'r') as f:
+        content = f.read()
+
+    count = len(re.findall(r'--- ALERT \(\d+\) ---', content))
+    print(count)
+
+def show_latest(log_file, oneline):
+    """Show the latest (most recent) alert."""
+    if not os.path.exists(log_file):
+        print(f"Log file {log_file} not found.")
+        return
+
+    with open(log_file, 'r') as f:
+        content = f.read()
+
+    pattern = r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) --- ALERT \((\d+)\) ---'
+    matches = list(re.finditer(pattern, content))
+
+    if not matches:
+        print("No alerts found in log.")
+        return
+
+    # Last match is the most recent
+    last = matches[-1]
+    timestamp = last.group(1)
+    aid = int(last.group(2))
+
+    # Get body: from end of this match to end of content (limited to first --------------------)
+    body_start = last.end()
+    body = content[body_start:]
+    mail_end = body.find('--------------------')
+    if mail_end != -1:
+        mail_content = body[:mail_end]
+    else:
+        mail_content = body
+
+    subject = "No Subject"
+    for line in mail_content.splitlines():
+        clean_line = re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\s+', '', line).strip()
+        if clean_line.lower().startswith("subject:"):
+            subject = clean_line.split(":", 1)[1].strip()
+            break
+
+    if oneline:
+        print(f"({aid:>4}) {timestamp} {subject}")
+    else:
+        print(f"--- ALERT ({aid}) ---")
+        print(f"{timestamp} --- ALERT ({aid}) ---{mail_content}--------------------")
+        print()
+
 def main():
-    parser = argparse.ArgumentParser(description="Debug SMTP Server")
+    parser = argparse.ArgumentParser(description="Debug SMTP Server / Alert Log Viewer")
     parser.add_argument("port_or_filter", nargs="?", default=None, help="Port to listen on OR filter for --log")
     parser.add_argument("--show-mail-only", action="store_true", help="Hide protocol details")
     parser.add_argument("--use-color", action="store_true", help="Visually enhance mail dump")
-    parser.add_argument("--log", action="store_true", help="Read emails from log instead of starting server")
+    parser.add_argument("--log", action="store_true", help="Read alerts from log instead of starting server")
     parser.add_argument("--oneline", action="store_true", help="Show only time and subject in log mode")
     parser.add_argument("--grep", help="Pattern to search for in log mode")
-    
+    parser.add_argument("--count", action="store_true", help="Print number of alerts logged")
+    parser.add_argument("--get", help="Show alert(s) by ID (e.g. --get 5 or --get 1-10)")
+
     args = parser.parse_args()
-    
+
     log_file = f"/var/log/{os.path.basename(__file__)}.log"
+
+    if args.count:
+        show_count(log_file)
+        return
+
+    if args.get:
+        show_by_id(log_file, args.get, args.oneline)
+        return
 
     if args.log:
         filter_val = args.port_or_filter if args.port_or_filter is not None else "0"
-        show_logs(log_file, filter_val, args.oneline, args.grep)
+        if filter_val.upper() == "LATEST":
+            show_latest(log_file, args.oneline)
+        else:
+            show_logs(log_file, filter_val, args.oneline, args.grep)
         return
 
     # Server mode
     host = "127.0.0.1"
     port = int(args.port_or_filter) if args.port_or_filter and args.port_or_filter.isdigit() else 1025
-    
+
     # Setup logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
@@ -242,19 +381,19 @@ def main():
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
+
     try:
         s.bind((host, port))
         s.listen(5)
         logging.info(f"Listening for SMTP connections on {host}:{port}...")
         if args.show_mail_only:
             logging.info("(Protocol details hidden. Waiting for mail...)")
-            
+
         while True:
             conn, addr = s.accept()
             handle_client(conn, addr, args.show_mail_only, args.use_color)
             conn.close()
-            
+
     except KeyboardInterrupt:
         logging.info("\nShutting down.")
     except Exception as e:

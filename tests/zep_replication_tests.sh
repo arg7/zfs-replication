@@ -149,6 +149,7 @@ destroy_node3
 zfs create -o canmount=noauto zep-node-3/test-3
 zfs unmount zep-node-3/test-3 2>/dev/null || true
 zfs allow zep-user-3 create,destroy,send,receive,snapshot,hold,release,userprop zep-node-3/test-3 2>/dev/null || true
+run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 fi
 
 if should_run 4; then
@@ -255,8 +256,8 @@ fi
 echo -e "\n${CYAN}=== Resume / Recovery Tests ===${RESET}"
 
 setup_resume_mode() {
-    zfs set zep:debug:throttle=32k "$DS"
-    zfs set zep:debug:send_timeout=5 "$DS"
+    zfs set zep:debug:throttle=64k "$DS"
+    zfs set zep:debug:send_timeout=10 "$DS"
     zep "$DS" --alias node1 --config zep:zfs:recv_opt="-F -s" --all > /dev/null 2>&1
 }
 teardown_resume_mode() {
@@ -276,7 +277,7 @@ run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
 setup_resume_mode
 
-# Write enough data that 5s timeout at 16k/s can't finish (~2MB)
+# Write enough data to trigger a transfer that may resume (~2MB)
 zfs set canmount=on zep-node-1/test-1; zfs mount zep-node-1/test-1 2>/dev/null
 dd if=/dev/urandom of=/zep-node-1/test-1/resume_big.dat bs=1M count=2 conv=fsync 2>/dev/null
 sync
@@ -287,7 +288,7 @@ assert_exit "interrupted" "!0" "$rc"
 assert_out  "timeout msg" "$out" "iomon: timeout"
 
 # Retry until complete (resume token persists across runs)
-# Each run at 16k/s 5s timeout transfers ~80KB, 2MB needs ~25 retries
+# Each run at 64k/s 10s timeout transfers ~640KB, 2MB needs ~4 retries
 completed=false
 for attempt in $(seq 1 30); do
     clean_tmp
