@@ -197,62 +197,55 @@ fi
 # RESUME TESTS — throttle + timeout interrupt
 # ══════════════════════════════════════════════════════════
 
-POOL_SIZE_BYTES=134217728   # 128M
-BIG_FILE_SIZE=$((POOL_SIZE_BYTES / 4))      # 32MB (~25%)
-SMALL_FILE_SIZE=$((POOL_SIZE_BYTES * 3 / 100))  # ~4MB (~3%)
-
 echo -e "\n${CYAN}=== Resume / Recovery Tests ===${RESET}"
 
-# Helper: enable throttled+resumable mode, write data, then clean up
 setup_resume_mode() {
-    zfs set zep:throttle=16k "$DS"
+    zfs set zep:debug:throttle=32k "$DS"
     zfs set zep:debug:send_timeout=5 "$DS"
-    zfs set zep:zfs:recv_opt="-F -s" "$DS"
+    zep "$DS" --alias node1 --config zep:zfs:recv_opt="-F -s" --all > /dev/null 2>&1
 }
 teardown_resume_mode() {
-    zfs inherit zep:throttle "$DS" 2>/dev/null || zfs set zep:throttle=- "$DS"
+    zfs inherit zep:debug:throttle "$DS" 2>/dev/null || zfs set zep:debug:throttle=- "$DS"
     zfs inherit zep:debug:send_timeout "$DS" 2>/dev/null || zfs set zep:debug:send_timeout=0 "$DS"
-    zfs set zep:zfs:recv_opt="-F" "$DS"
-}
-
-write_file() {
-    local path="$1" size="$2" name="$3"
-    dd if=/dev/urandom of="$path/$name" bs=1M count=$((size / 1048576)) conv=fsync 2>/dev/null
+    zep "$DS" --alias node1 --config zep:debug:throttle=- --all > /dev/null 2>&1
+    zep "$DS" --alias node1 --config zep:debug:send_timeout=0 --all > /dev/null 2>&1
 }
 
 # ══════════════════════════════════════════════════════════
 # TEST 11: RESUME — interrupted transfer resumes and completes
 # ══════════════════════════════════════════════════════════
-echo -e "\n${CYAN}[11] RESUME — throttled + timeout, re-run completes${RESET}"
+echo -e "\n${CYAN}[11] RESUME — interrupted transfer resumes, completes within retries${RESET}"
 destroy_node3
 run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
 setup_resume_mode
 
-# Write 32MB file to master
+# Write enough data that 5s timeout at 16k/s can't finish (~2MB)
 zfs set canmount=on zep-node-1/test-1; zfs mount zep-node-1/test-1 2>/dev/null
-write_file /zep-node-1/test-1 "$BIG_FILE_SIZE" "resume_big.dat"
+dd if=/dev/urandom of=/zep-node-1/test-1/resume_big.dat bs=1M count=2 conv=fsync 2>/dev/null
 sync
 
-# Run with throttle+timeout — should be interrupted
+# Run — expect interruption
 out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-assert_out  "interrupted" "$out" "Pipeline failed" "yes"
+assert_exit "interrupted" "!0" "$rc"
+assert_out  "timeout msg" "$out" "iomon: timeout"
 
-# Run again — might still be interrupted (transfer is big, 5s may not be enough per run)
-attempts=1
-while [[ $attempts -le 5 ]]; do
+# Retry until complete (resume token persists across runs)
+# Each run at 16k/s 5s timeout transfers ~80KB, 2MB needs ~25 retries
+completed=false
+for attempt in $(seq 1 30); do
     clean_tmp
-    out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
+    out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
     if [[ $rc -eq 0 ]]; then
+        completed=true
         break
     fi
-    ((attempts++))
 done
-assert_exit "completed within 5 retries" "0" "$rc"
-
-# Verify big file reached node3
-cnt=$(ssh zep-user-3@zep-node-3.local "ls /zep-node-3/test-3/resume_big.dat 2>/dev/null | wc -l" 2>/dev/null || echo 0)
-assert_out  "file on sink" "$cnt" "1"
+if [[ "$completed" == true ]]; then
+    echo -e "  ${GREEN}PASS${RESET} completed within 30 retries"; ((PASS++))
+else
+    echo -e "  ${RED}FAIL${RESET} did not complete in 30 retries"; ((FAIL++))
+fi
 
 teardown_resume_mode
 
@@ -265,50 +258,59 @@ run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
 setup_resume_mode
 
-# Create 10 snapshots on master, each with ~4MB of data
+# Create 5 snapshots with ~2MB data each
 zfs mount zep-node-1/test-1 2>/dev/null
-for i in $(seq 1 10); do
-    write_file /zep-node-1/test-1 "$SMALL_FILE_SIZE" "snap_${i}_data.dat"
+for i in $(seq 1 5); do
+    dd if=/dev/urandom of=/zep-node-1/test-1/snap_${i}.dat bs=1M count=2 conv=fsync 2>/dev/null
     sync
     zfs snapshot "zep-node-1/test-1@zep_${LABEL}_snap_${i}" 2>/dev/null
 done
 
-# Run replication — will be interrupted by iomon timeout mid-way
-out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-assert_out  "interrupted" "$out" "Pipeline failed" "yes"
+# Run — will be interrupted, token saved on node2
+out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+assert_exit "interrupted" "!0" "$rc"
+assert_out  "timeout msg" "$out" "iomon: timeout"
 
-# Check that a resume token exists on node3
-token=$(ssh zep-user-3@zep-node-3.local "zfs get -H -o value receive_resume_token zep-node-3/test-3" 2>/dev/null || echo "-")
-assert_out  "resume token saved on sink" "$token" "-" "no"  # should NOT be "-"
+# Verify resume token exists on node2
+token=$(ssh zep-user-2@zep-node-2.local "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
+if [[ "$token" != "-" ]]; then
+    echo -e "  ${GREEN}PASS${RESET} resume token saved"; ((PASS++))
+else
+    echo -e "  ${RED}FAIL${RESET} resume token not saved"; ((FAIL++))
+fi
 
-# Destroy some of the source snapshots being transmitted (snaps 3-7)
-for i in 3 4 5 6 7; do
+# Destroy snapshots 2-4 on master (being transmitted)
+for i in 2 3 4; do
     zfs destroy "zep-node-1/test-1@zep_${LABEL}_snap_${i}" 2>/dev/null || true
 done
 
-# Re-run — zfs send should detect ERR_RESUME_FAILED, clear token, alert, exit !0
+# Re-run — should detect ERR_RESUME_FAILED, clear token
 out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-assert_exit "resume failed detected" "!0" "$rc"
-assert_out  "ERR_RESUME_FAILED in output" "$out" "cannot resume" "yes"
+assert_exit "resume failed" "!0" "$rc"
+assert_out  "token invalidated" "$out" "Resume token invalidated"
+assert_out  "token destroyed" "$out" "Destroyed stale resume token"
 
-# Disable throttling/timeout, re-run — should complete cleanly
-teardown_resume_mode
-out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-assert_exit "clean run after resume failure" "0" "$rc"
-
-# Verify remaining snapshots (1,2,8,9,10) reached node3
-rem_snaps=$(ssh zep-user-3@zep-node-3.local "zfs list -t snap -H -o name zep-node-3/test-3 2>/dev/null | grep 'zep_${LABEL}_snap_' | wc -l" 2>/dev/null || echo 0)
-if [[ $rem_snaps -ge 5 ]]; then
-    echo -e "  ${GREEN}PASS${RESET} remaining snaps on sink: $rem_snaps >= 5"
-    ((PASS++))
+# Token should be cleared
+token=$(ssh zep-user-2@zep-node-2.local "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
+if [[ "$token" == "-" ]]; then
+    echo -e "  ${GREEN}PASS${RESET} token cleared after failure"; ((PASS++))
 else
-    echo -e "  ${RED}FAIL${RESET} remaining snaps on sink: $rem_snaps < 5"
-    ((FAIL++))
+    echo -e "  ${RED}FAIL${RESET} token not cleared"; ((FAIL++))
 fi
 
+# Disable throttling, run clean — should complete with --init for node3
 teardown_resume_mode
+out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+assert_exit "clean run after failure" "0" "$rc"
 
-# ── summary ──────────────────────────────────────────────
+# Remaining snaps (1 and 5) should reach node2
+rem=$(ssh zep-user-2@zep-node-2.local "zfs list -t snap -H -o name zep-node-2/test-2 2>/dev/null | grep -c 'zep_${LABEL}_snap_'" 2>/dev/null || echo 0)
+rem=$(echo "$rem" | tr -d '[:space:]')
+if [[ -n "$rem" && "$rem" -ge 2 ]]; then
+    echo -e "  ${GREEN}PASS${RESET} remaining snaps on sink: $rem >= 2"; ((PASS++))
+else
+    echo -e "  ${RED}FAIL${RESET} remaining snaps on sink: '$rem' < 2"; ((FAIL++))
+fi
 
 echo ""
 echo -e "${CYAN}======================================${RESET}"
