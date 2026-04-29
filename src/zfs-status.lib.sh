@@ -6,17 +6,19 @@ get_node_state() {
     local raw_ds="$2"
     local node_role="$3"  # master, middle, or sink
     local sync_props_data="$4"
-    local fqdn=$(resolve_node_fqdn "$alias" "$raw_ds")
-    local user=$(resolve_node_user "$alias" "$raw_ds")
-    local ssh_t=$(resolve_ssh_timeout "$raw_ds")
+    local config_ds="$5"  # master dataset that holds node config (user/fqdn)
+    [[ -z "$config_ds" ]] && config_ds="$raw_ds"
+    local fqdn=$(resolve_node_fqdn "$alias" "$config_ds")
+    local user=$(resolve_node_user "$alias" "$config_ds")
+    local ssh_t=$(resolve_ssh_timeout "$config_ds")
     local output
     local props_arg=""
     [[ -n "$sync_props_data" ]] && props_arg="--sync-props $sync_props_data"
 
-    if [[ "$alias" == "$(get_local_alias "$raw_ds" "")" ]]; then
+    if [[ "$alias" == "$(get_local_alias "$config_ds" "")" ]]; then
         output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats "$raw_ds" $props_arg 2>/dev/null)
     else
-        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "$ZEPLICATOR_CMD --alias $alias --stats $raw_ds $props_arg" 2>/dev/null)
+        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "zep --alias $alias --stats $raw_ds $props_arg" 2>/dev/null)
     fi
 
     if [[ -z "$output" ]]; then
@@ -68,7 +70,7 @@ cmd_status() {
             fi
         fi
 
-        out=$(get_node_state "$n" "$node_ds" "$node_role" "$sync_props_data")
+        out=$(get_node_state "$n" "$node_ds" "$node_role" "$sync_props_data" "$raw_filesystem")
         
         node_reachable=$?
         

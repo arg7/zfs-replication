@@ -100,16 +100,33 @@ divergence_report() {
     # We are after common snap — check for writes
     found_divergence="true"
     report+="diff:\n"
-    #zfs mount "$ds" 2>/dev/null
     local diff_text
     diff_text=$(zfs diff "$prev" "$ds" 2>/dev/null | head -n 15 | awk '{print "  |  " $0}')
-    if [[ -z "$diff_text" ]]; then
-	return 0
+    if [[ -n "$diff_text" ]]; then
+        report+="${diff_text}\n"
+        echo -e "$report"
+        return 2
     fi
-    report+="${diff_text}\n"
 
-    echo -e "$report"
-    return 2
+    # zfs diff failed (likely unmounted) — fallback to referenced size comparison
+    local ref_snap ref_live
+    ref_snap=$(zfs get -H -p -o value referenced "$prev" 2>/dev/null)
+    ref_live=$(zfs get -H -p -o value referenced "$ds" 2>/dev/null)
+    if [[ -n "$ref_snap" && -n "$ref_live" && "$ref_snap" != "$ref_live" ]]; then
+        local ref_snap_fmt=$(numfmt --to=iec --suffix=B "$ref_snap" 2>/dev/null || echo "${ref_snap}B")
+        local delta
+        if [[ "$ref_live" -gt "$ref_snap" ]]; then
+            delta=$((ref_live - ref_snap))
+        else
+            delta=0
+        fi
+        local delta_fmt=$(numfmt --to=iec --suffix=B "$delta" 2>/dev/null || echo "${delta}B")
+        report+="  |  ${delta_fmt} of data written since common snapshot @${common_snap}\n"
+        echo -e "$report"
+        return 2
+    fi
+
+    return 0
 }
 
 zfsbud_core() {
@@ -185,7 +202,11 @@ zfsbud_core() {
     output=$($remote_shell zfs list -H -o name,guid -t snapshot -r "$target_ds" 2>/dev/null)
     local status=$?
     [[ $status -ne 0 && $status -ne 1 ]] && return $status
-    mapfile -t destination_snapshots <<< "$output"
+    if [[ -n "$output" ]]; then
+        mapfile -t destination_snapshots <<< "$output"
+    else
+        destination_snapshots=()
+    fi
     if [[ "$DRY_RUN" == true ]]; then
         if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
             IFS=',' read -ra v_snaps <<< "$VIRTUAL_SNAPS_INCOMING"
@@ -237,6 +258,120 @@ zfsbud_core() {
     [ -n "$last_snapshot_common" ] && return 0 || return 1
   }
 
+  verify_target() {
+    local target_ds="$1"
+    local pool="${target_ds%%/*}"
+
+    # 1. Pool check
+    if ! $remote_shell zpool list -H -o name "$pool" >/dev/null 2>&1; then
+        zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Pool '$pool' not found on target node."
+        return $EXIT_NO_POOL
+    fi
+
+    # 2. Dataset existence
+    local ds_exists
+    if $remote_shell zfs list -H -o name "$target_ds" >/dev/null 2>&1; then
+        ds_exists=true
+    else
+        ds_exists=false
+    fi
+
+    # ---- Permission helpers ----
+    _check_pool_perms() {
+        local user="$1" p="$2"
+        local perms
+        perms=$($remote_shell zfs allow "$p" 2>/dev/null | grep "user $user " | awk '{print $NF}')
+        local missing=()
+        for perm in create mount receive userprop; do
+            [[ ",$perms," != *",$perm,"* ]] && missing+=("$perm")
+        done
+        if [[ ${#missing[@]} -gt 0 ]]; then
+            zbud_msg "  ${C_RED}❌ Missing pool permissions on $p:${C_RESET} ${missing[*]}"
+            return 1
+        fi
+        return 0
+    }
+
+    # Extract SSH user from remote_shell for permission checks
+    local check_user="root"
+    if [[ -n "$remote_shell" ]]; then
+        check_user=$(echo "$remote_shell" | grep -oP '\S+@\S+' | cut -d@ -f1)
+        [[ -z "$check_user" ]] && check_user="root"
+    fi
+
+    if [[ "$ds_exists" != true ]]; then
+        # Dataset doesn't exist — initial send expected
+        if [[ -n "$remote_shell" ]]; then
+            _check_pool_perms "$check_user" "$pool" || return $EXIT_NO_PERMS
+        fi
+        zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Target dataset does not exist, will be created by receive."
+        return $EXIT_NO_DATASET
+    fi
+
+    # 3. Dataset exists — verify pool permissions for userprop (needed after recv)
+    if [[ -n "$remote_shell" ]]; then
+        _check_pool_perms "$check_user" "$pool" || return $EXIT_NO_PERMS
+    fi
+
+    # 4. No snapshots on destination — clean dataset, safe for init
+    if [[ ${#destination_snapshots[@]} -eq 0 ]]; then
+        if [[ -n "$initial" ]]; then
+            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Target dataset exists but has no snapshots — clean init."
+            return $EXIT_NO_DATASET
+        fi
+        return 0
+    fi
+
+    # 5. Has snapshots — check for common ground
+    if ! set_common_snapshot; then
+        # FOREIGN dataset: has snapshots, no common ground
+        zbud_msg "  ${C_RED}❌ FOREIGN DATASET:${C_RESET} $target_ds has snapshots but no common ground with source."
+        zbud_msg "  ${C_YELLOW}Remote snapshots ($(printf '%s\n' "${destination_snapshots[@]}" | awk '{print $1}' | grep -c .) total):${C_RESET}"
+        printf '%s\n' "${destination_snapshots[@]}" | awk '{print "    "$1}' | head -n 20
+        local remaining=$(printf '%s\n' "${destination_snapshots[@]}" | awk '{print $1}' | grep -c .)
+        if [[ $remaining -gt 20 ]]; then
+            zbud_msg "    ... and $((remaining - 20)) more"
+        fi
+        zbud_msg "  ${C_YELLOW}Manual intervention required — verify this is the correct target or destroy it.${C_RESET}"
+        return 1
+    fi
+
+    # 6. Common ground exists — check for divergence on remote
+    local common_snap_name="${last_snapshot_common#*@}"
+    if [[ -n "$remote_shell" ]]; then
+        local div_output div_rc
+        div_output=$($remote_shell "zep --divergence-report $common_snap_name $target_ds" 2>&1)
+        div_rc=$?
+
+        if [[ $div_rc -eq 2 ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  DIVERGENCE DETECTED${C_RESET} on $target_ds since snapshot @$common_snap_name"
+            echo -e "$div_output" | while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                echo -e "${CHAIN_PREFIX}  | $line"
+            done
+
+            if [[ "$YES" != true ]]; then
+                if [[ -t 0 ]]; then
+                    echo -ne "${CHAIN_PREFIX}  ${C_YELLOW}Sync will discard this data on target. Continue? [y/N] ${C_RESET}"
+                    read -r resp
+                    if [[ "$resp" != "y" && "$resp" != "Y" ]]; then
+                        zbud_msg "  ${C_YELLOW}⚠️${C_RESET} Aborted by user."
+                        return 1
+                    fi
+                else
+                    zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Divergence detected but no TTY. Use -y to force."
+                    return 1
+                fi
+            fi
+            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Forcing alignment — remote data since @$common_snap_name will be discarded."
+        elif [[ $div_rc -ne 0 ]]; then
+            zbud_msg "  ${C_YELLOW}⚠️${C_RESET} Divergence check failed (code $div_rc), proceeding anyway."
+        fi
+    fi
+
+    return 0
+  }
+
   send_snapshot() {
     local remote_ds="$1"
     local is_initial="$2"
@@ -286,11 +421,6 @@ zfsbud_core() {
     local alias_val=${CLI_ALIAS:-$(hostname)}
     local lock_path="${LOCKFILE:-/tmp/${prefix}${alias_val}-default.lock}"
     local err_log="${REPL_ERR_FILE:?REPL_ERR_FILE not set}"
-
-    if [[ "$is_initial" == "true" && "$DESTROY_CHAIN" == true ]]; then
-        zbud_msg "  💥 DESTROY_CHAIN: Cleaning up $remote_ds for initial send..."
-        $remote_shell zfs destroy -r "$remote_ds" 2>/dev/null || true
-    fi
 
     > "${lock_path}.cnt"
     > "$err_log"
@@ -424,29 +554,39 @@ zfsbud_core() {
        return $ds_status
     fi
 
-    if ! set_common_snapshot; then
-       if [ -n "$initial" ]; then
-          send_snapshot "$remote_ds" "true" || return $?
-       else
-          zbud_warn "No common snapshots for $local_ds."
-          send_smtp_alert "warning" "WARNING: No common snapshots for $local_ds to $remote_ds."
-          return 1
-       fi
-    else
-        local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
-        if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
-            zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@})."
-        fi
+    verify_target "$remote_ds"
+    local vt_rc=$?
 
-        # Already up to date check
-        local latest_src_snap=$(echo "${source_snapshots[-1]}" | awk '{print $1}')
-        if [[ "$latest_src_snap" == *"$last_snapshot_common" ]]; then
-            zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
-            return 0
-        fi
-
-        send_snapshot "$remote_ds" "false" || return $?
-    fi
+    case $vt_rc in
+        $EXIT_NO_DATASET)
+            if [ -n "$initial" ]; then
+                send_snapshot "$remote_ds" "true" || return $?
+            else
+                zbud_warn "No dataset on target for $remote_ds. Use --init for initial replication."
+                return $vt_rc
+            fi
+            ;;
+        $EXIT_NO_POOL|$EXIT_NO_PERMS)
+            return $vt_rc
+            ;;
+        0)
+            if [ -n "$last_snapshot_common" ]; then
+                local latest_src_snap=$(echo "${source_snapshots[-1]}" | awk '{print $1}')
+                if [[ "$latest_src_snap" == *"$last_snapshot_common" ]]; then
+                    zbud_msg "  ${C_DIM}⏩${C_RESET} Skipping incremental: already up to date."
+                    return 0
+                fi
+                local latest_dest_snap=$(echo "${destination_snapshots[-1]}" | awk '{print $1}')
+                if [[ "$latest_dest_snap" != *"$last_snapshot_common" ]]; then
+                    zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Destination has newer snapshots (e.g. ${latest_dest_snap#*@})."
+                fi
+                send_snapshot "$remote_ds" "false" || return $?
+            fi
+            ;;
+        *)
+            return $vt_rc
+            ;;
+    esac
   done
   return 0
 }

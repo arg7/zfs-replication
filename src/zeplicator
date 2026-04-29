@@ -47,7 +47,7 @@ Primary Flags:
 Advanced Flags:
   --mark-only       Only perform rotation/cleanup of already shipped snapshots.
   --rotate          Run snapshot retention rotation for all labels locally (for root cron).
-  --destroy-chain   Force a fresh start when promoting if no common ground exists.
+  --align-chain-data  Force chain data alignment during promotion (skips rollback).
   --snap <name>     Specify a literal snapshot name to use for promotion/rollback.
   --apply-props <b> Apply encoded replication properties and exit (internal).
   --target <node>   Point-to-point transfer to a specific node (ignores chain).
@@ -88,7 +88,7 @@ AUTO=false
 DRY_RUN=false
 VIRTUAL_SNAPS_INCOMING=""
 VIRTUAL_SNAP_CREATED=""
-DESTROY_CHAIN=false
+ALIGN_CHAIN_DATA=false
 YES=false
 PROMOTE_SNAP=""
 sync_props_data=""
@@ -121,7 +121,7 @@ while [[ $# -gt 0 ]]; do
         --resume) RESUME=true; shift ;;
         --cascaded) CASCADED=true; shift ;;
         --auto) AUTO=true; shift ;;
-        --destroy-chain) DESTROY_CHAIN=true; shift ;;
+        --align-chain-data) ALIGN_CHAIN_DATA=true; shift ;;
         -y) YES=true; shift ;;
         --snap) PROMOTE_SNAP="$2"; shift 2 ;;
         --apply-props) APPLY_PROPS="$2"; shift 2 ;;
@@ -176,8 +176,8 @@ validate_args() {
     local errors=()
 
     # 0. Flag dependency checks (before anything else)
-    if [[ "$DESTROY_CHAIN" == true && "$PROMOTE" != true ]]; then
-        errors+=("ERR: --destroy-chain requires --promote")
+    if [[ "$ALIGN_CHAIN_DATA" == true && "$PROMOTE" != true ]]; then
+        errors+=("ERR: --align-chain-data requires --promote")
     fi
     if [[ -n "$PROMOTE_SNAP" && "$PROMOTE" != true ]]; then
         errors+=("ERR: --snap requires --promote")
@@ -188,8 +188,8 @@ validate_args() {
     if [[ "$initial_send" == true && "$PROMOTE" == true ]]; then
         errors+=("ERR: --init and --promote are mutually exclusive")
     fi
-    if [[ "$PROMOTE" == true && "$AUTO" != true && -z "$PROMOTE_SNAP" && "$DESTROY_CHAIN" != true ]]; then
-        errors+=("ERR: --promote requires one of: --auto, --snap <name>, or --destroy-chain")
+    if [[ "$PROMOTE" == true && "$AUTO" != true && -z "$PROMOTE_SNAP" && "$ALIGN_CHAIN_DATA" != true ]]; then
+        errors+=("ERR: --promote requires one of: --auto, --snap <name>, or --align-chain-data")
     fi
 
     # 1. Filesystem required (except for status/stats/config)
@@ -625,7 +625,7 @@ if [[ "$PROMOTE" == true ]]; then
         exit 0
     fi
 
-    if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" || "$DESTROY_CHAIN" == true ]]; then
+    if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" || "$ALIGN_CHAIN_DATA" == true ]]; then
         TARGET_SNAP=""
         declare -a REACHABLE_NODES=()
         declare -a UNREACHABLE_NODES=()
@@ -741,14 +741,14 @@ if [[ "$PROMOTE" == true ]]; then
             rm -f "$tmp_common"
         fi
 
-        if [[ "$DESTROY_CHAIN" == true && -n "$TARGET_SNAP" ]]; then
-            echo "ABORT: Common snapshot @$TARGET_SNAP found! Destruction is NOT necessary."
+        if [[ "$ALIGN_CHAIN_DATA" == true && -n "$TARGET_SNAP" ]]; then
+            echo "ABORT: Common snapshot @$TARGET_SNAP found! Use --auto instead of --align-chain-data."
             exit 1
         fi
         
         if [[ "$AUTO" == true || -n "$PROMOTE_SNAP" ]]; then
             if [[ -z "$TARGET_SNAP" ]]; then
-                die "ERR: Could not find a common snapshot across all nodes. Use --destroy-chain if you want to start fresh."
+                die "ERR: Could not find a common snapshot across all nodes. Use --align-chain-data to force alignment without rollback."
             fi
 
             if [[ "$YES" != true ]]; then
@@ -821,7 +821,7 @@ if [[ "$PROMOTE" == true ]]; then
             fi
             exit 0
         else
-            # --promote --destroy-chain (no --auto or --snap): set new chain without rollback
+            # --promote --align-chain-data (no --auto or --snap): set new chain without rollback
             echo "  ✨ Setting new chain configuration without rollback..."
             zfs set zep:chain="$NEW_CHAIN" "$local_ds"
             REPL_CHAIN="$NEW_CHAIN"
@@ -1270,6 +1270,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$initial_send" == true ]]; then casc_opts+=" --init"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
             if [[ "$ZEP_BW" == "true" ]]; then casc_opts+=" -bw"; fi
+            if [[ "$YES" == true ]]; then casc_opts+=" -y"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then casc_opts+=" --force-color"; fi
 
             PROPS_ARG=""

@@ -99,19 +99,16 @@ alert:critical:threshold=$ALERT_CRITICAL_THRESHOLD
 alert:warn:threshold=$ALERT_WARN_THRESHOLD
 alert:info:threshold=$ALERT_INFO_THRESHOLD
 suspend=false
-user=root
+user=zep-user-1
 zfs:send_opt=-p
 zfs:throttle=$ZFS_THROTTLE
 EOF
 
-# Add node definitions to master config
-# Master (node1) uses root, chain nodes use dedicated zep-user accounts
+# Add node definitions to master config (all nodes use dedicated zep-user accounts)
 for j in $(seq 1 "$NUM_NODES"); do
     echo "node:node$j:fqdn=zep-node-$j.local" >> "$CONFIG_FILE"
     echo "node:node$j:fs=zep-node-$j/test-$j" >> "$CONFIG_FILE"
-    if [[ $j -ne 1 ]]; then
-        echo "node:node$j:user=zep-user-$j" >> "$CONFIG_FILE"
-    fi
+    echo "node:node$j:user=zep-user-$j" >> "$CONFIG_FILE"
 done
 
 echo "Initializing $NUM_NODES nodes with $POOL_SIZE pools..."
@@ -191,9 +188,9 @@ for i in $(seq 1 "$NUM_NODES"); do
 
     # Delegate minimal ZFS permissions for replication
     # Pool-level: create+mount needed for zfs recv to create/receive datasets
-    zfs allow "$ZEP_USER" create,mount "$POOL_NAME"
+    zfs allow "$ZEP_USER" create,mount,receive,destroy,userprop,diff "$POOL_NAME"
     # Dataset-level: minimal set for send/receive pipeline
-    zfs allow "$ZEP_USER" send,receive,snapshot,hold,release,userprop "$DATASET_NAME"
+    zfs allow "$ZEP_USER" create,destroy,send,receive,snapshot,hold,release,userprop "$DATASET_NAME"
 
     echo "  ✅ $ZEP_USER set up with delegated ZFS rights on $POOL_NAME"
 done

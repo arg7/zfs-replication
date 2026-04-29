@@ -2,6 +2,11 @@
 
 # zfs-common.lib.sh - Shared utility functions for Zeplicator
 
+# Exit codes for target verification
+EXIT_NO_DATASET=3
+EXIT_NO_POOL=4
+EXIT_NO_PERMS=5
+
 # Audit logging for ZFS/ZPOOL commands
 zfs() {
     log_message "AUDIT: zfs $*"
@@ -370,7 +375,7 @@ apply_repl_props() {
             local prop_key="${p%%=*}"
             # Skip ZFS readonly properties
             [[ "$prop_key" =~ ^(guid|used|available|referenced|compressratio|logicalused|usedbysnapshots|usedbydataset|usedbyrefreservation|usedbychildren|creation|written|logicalreferenced|volblocksize|refreservation|refquota|quota)$ ]] && continue
-            local current_val=$(get_zfs_prop "$prop_key" "$ds")
+            local current_val=$(zfs get -H -o value "$prop_key" "$ds" 2>/dev/null)
             local new_val="${p#*=}"
             if [[ "$current_val" != "$new_val" ]]; then
                  if [[ "$DRY_RUN" == true ]]; then
@@ -405,16 +410,17 @@ seed_cache_from_encoded() {
             local ds_name="${sections[$i]}"
             local props_str="${sections[$i+1]}"
             [[ -z "$ds_name" || -z "$props_str" ]] && { i=$((i+2)); continue; }
-            # Seed under the raw dataset name
             IFS="$RS" read -ra props <<< "$props_str"
             for p in "${props[@]}"; do
                 [[ -z "$p" ]] && continue
                 local k="${p%%=*}"
                 local v="${p#*=}"
                 ZEP_PROP_CACHE["${ds_name}:${k}"]="$v"
+                if [[ "$ds_name" != "$raw_ds" ]]; then
+                    ZEP_PROP_CACHE["${raw_ds}:${k}"]="$v"
+                fi
             done
-            # If local_ds differs from raw_ds, also seed under mapped local path
-            if [[ "$local_ds" != "$raw_ds" && "$ds_name" == "$raw_ds"* ]]; then
+            if [[ "$local_ds" != "$raw_ds" ]]; then
                 local local_child="${ds_name/#$raw_ds/$local_ds}"
                 for p in "${props[@]}"; do
                     [[ -z "$p" ]] && continue
@@ -520,7 +526,7 @@ die() {
             echo -e "${C_BOLD}HINT: If replication failed because there is no common ground:${C_RESET}"
             echo "  - For a new destination: try adding the '--init' flag."
             echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
-            echo "  - To force a fresh start (DANGER): use '--promote --destroy-chain' on the Master."
+            echo "  - To force alignment without rollback: use '--promote --align-chain-data' on the Master."
         fi
     fi
     exit $exit_code
