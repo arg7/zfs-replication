@@ -434,9 +434,12 @@ zfsbud_core() {
     zbud_msg "  🚀 Sending $transfer_label replication to $remote_ds..."
 
     # --- Build pipeline ---
-    local iomon_rate="1k"  # hardcoded for testing resume
+    local iomon_rate=""
+    [[ -n "$throttle" && "$throttle" != "-" ]] && iomon_rate="$throttle"
     log_message "IOMON: lock=$lock_path interval=1 timeout=$iomon_timeout rate=$iomon_rate"
-    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate | mbuffer $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
+    local mbuf_opt="$mbuffer_throttle"
+    [[ -n "$iomon_rate" ]] && mbuf_opt="-q"  # iomon throttles; mbuffer passes through
+    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate | mbuffer $mbuf_opt -m \"$mbuffer_size\" 2>>\"$err_log\""
     if [[ -n "$remote_shell" ]]; then
         pipeline+=" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_opt $remote_ds\" 2>>\"$err_log\""
     else
@@ -482,6 +485,12 @@ zfsbud_core() {
             plain_alert+="$clean_hint"
             send_smtp_alert "critical" "$plain_alert"
             return 2
+        elif [[ -s "$err_log" ]] && grep -q "cannot resume" "$err_log"; then
+            zbud_msg "  ${C_RED}🔄${C_RESET} Resume token invalidated — source snapshots destroyed mid-transfer."
+            $remote_shell zfs recv -A "$remote_ds" 2>/dev/null && \
+                zbud_msg "  ${C_CYAN}ℹ️${C_RESET}  Destroyed stale resume token on $remote_ds."
+            send_smtp_alert "warning" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared."
+            return $status
         elif [[ -s $err_log ]] && ! grep -vq "destination already exists" "$err_log"; then
             zbud_msg "  ⚠️  Destination snapshot already exists. Treating as success."
             status=0
