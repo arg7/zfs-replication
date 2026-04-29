@@ -37,8 +37,8 @@ suite in a live, observable environment.
   zep:policy          fail | resilience (default: fail)
   zep:zfs:send_opt    extra flags for zfs send (eg. -Lp)
   zep:zfs:recv_opt    extra flags for zfs recv (default: -F)
-  zep:debug:throttle  iomon rate limit (eg. 32k, 128k)
-  zep:debug:send_timeout  iomon timeout in seconds
+  zep:debug:throttle  zfs pipe rate limit (eg. 32k, 128k)
+  zep:debug:send_timeout  inject disconnect into zfs pipe (seconds)
   zep:suspend         true | false (pause replication)
 
   SIMULATOR CHEATSHEET (pane 3)
