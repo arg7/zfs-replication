@@ -804,7 +804,7 @@ if [[ "$PROMOTE" == true ]]; then
                 echo -n "    - $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
-                    "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
+                    "zep $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
                 if [[ $_ssh_rc -eq 0 ]]; then
                     echo "✅"
                 else
@@ -852,7 +852,7 @@ if [[ "$PROMOTE" == true ]]; then
                 echo -n "    - $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
-                    "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
+                    "zep $raw_filesystem $label $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
                 if [[ $_ssh_rc -eq 0 ]]; then
                     echo "✅"
                 else
@@ -1230,7 +1230,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$ZEP_BW" == "true" ]]; then donor_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then donor_opts+=" --force-color"; fi
 
-            if ssh "$donor_target" "$ZEPLICATOR_CMD $raw_filesystem $label $keep_fallback $donor_opts"; then
+            if ssh "$donor_target" "zep $raw_filesystem $label $keep_fallback $donor_opts"; then
                 echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Delegated replication from $DONOR_NODE to $hop_node successful."
 
                 # RETRY local replication now that common ground should exist
@@ -1279,7 +1279,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             PROPS_ARG="--sync-props $props_to_pass"
 
             # Cascade downstream through SSH — output flows through directly
-            ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; $ZEPLICATOR_CMD $remote_ds $label $keep_fallback $casc_opts $PROPS_ARG --cascaded"
+            ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "$HOP_TARGET" "export CHAIN_PREFIX=\"${CHAIN_PREFIX}\"; zep $remote_ds $label $keep_fallback $casc_opts $PROPS_ARG --cascaded"
             SSH_STATUS=$?
 
             if [[ $SSH_STATUS -eq 2 ]]; then
