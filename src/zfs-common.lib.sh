@@ -44,7 +44,7 @@ cache_zfs_props() {
     # Fetch all zep: properties from ZFS (overrides defaults where set)
     while IFS=$'\t' read -r prop val; do
         [[ "$val" == "-" ]] && continue  # keep default for unset
-        [[ "$prop" =~ :(shipped|alias|suspend)$ ]] && continue
+        [[ "$prop" =~ :(shipped|split-brain)$ ]] && continue
         ZEP_PROP_CACHE["${ds}:${prop}"]="$val"
     done < <(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:")
     # Batch-fetch remaining per-node props in one call (chain node props not yet cached)
@@ -86,12 +86,9 @@ get_zfs_prop() {
         return 0
     fi
 
-    # Cache miss — fetch from ZFS and cache result (including "-" for unset)
-    local val
-    val=$(zfs get -H -o value "$prop" "$ds" 2>/dev/null | head -n 1)
-    [[ -z "$val" ]] && val="-"
-    ZEP_PROP_CACHE["$key"]="$val"
-    echo "$val"
+    # Cache miss — property was never populated; treat as unset
+    ZEP_PROP_CACHE["$key"]="-"
+    echo "-"
 }
 
 # Get the local node alias (using cli override, hostname in chain, fqdn match, or hostname as fallback)
