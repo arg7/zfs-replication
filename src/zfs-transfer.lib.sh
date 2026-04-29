@@ -437,7 +437,9 @@ zfsbud_core() {
     local iomon_rate=""
     [[ -n "$throttle" && "$throttle" != "-" ]] && iomon_rate="$throttle"
     log_message "IOMON: lock=$lock_path interval=1 timeout=$iomon_timeout rate=$iomon_rate throttle_prop=$throttle"
-    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
+    local mbuf_opt="$mbuffer_throttle"
+    [[ -n "$iomon_rate" ]] && mbuf_opt="-q"  # iomon handles throttling; mbuffer passes through
+    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate | mbuffer $mbuf_opt -m \"$mbuffer_size\" 2>>\"$err_log\""
     if [[ -n "$remote_shell" ]]; then
         pipeline+=" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_opt $remote_ds\" 2>>\"$err_log\""
     else
