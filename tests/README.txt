@@ -14,10 +14,13 @@ suite in a live, observable environment.
 
   TEST CONTROLS (pane 3)
   ──────────────────────
-  start                      run all 14 tests
-  start --test 13 14         run only resilience tests
+  list                       list available tests
+  log                        cat last test log
+  log 05                     cat test 05 log
+  start                      run all 16 tests
+  start --test 7 8           run only resilience tests
   start --test 2 12          run only tests 2 and 12
-  start --skip 11 13         skip resume and resilience tests
+  start --skip 5 6           skip resume tests
   stop                       abort running test suite
   q                          stop tests and exit tmux session
 
@@ -55,27 +58,10 @@ suite in a live, observable environment.
   # Watch a specific node's snapshots
   watch -n 5 'zfs list -t snap -r zep-node-2/test-2'
 
-  # Send keystrokes to pane 2 (status watcher)
-  keystroke 'watch -n 5 zfs list -t snap -r zep-node-1/test-1'
-
   TEST OVERVIEW
   ─────────────
-   1  INIT_CLEAN       — initial replication, clean dest
-   2  INCREMENTAL       — normal incremental run
-   3  FOREIGN_DATASET   — node3 has alien snapshots
-   4  MISSING_PERMS     — revoked ZFS permissions
-   5  DIVERGENCE        — split-brain divergence detected
-   6  DIVERGENCE_OVERRIDE — -y forces through divergence
-   7  NON_MASTER_SKIP   — non-master skips snapshot creation
-   8  MISSING_POOL      — target pool exported
-   9  STATUS            — status command works
-  10  ROTATE            — retention keeps count
-  11  RESUME            — interrupted transfer resumes
-  12  RESUME_FAILED     — mid-transfer snapshot loss
-  13  RESILIENCE_NODE2_OFFLINE — offline node, partial success
-  14  RESILIENCE_NODE2_RECOVERY — restored node, full success
-  15  PROMOTE_NODE3       — promote node3 to master
-  16  PROMOTE_NODE1_BACK   — restore node1 as master
+  Type 'list' to see all tests.
+  Type 'log' to see latest test log.
 
   TO QUIT
   ───────

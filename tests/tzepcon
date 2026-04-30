@@ -61,8 +61,8 @@ tmux send-keys -t "$SESSION_NAME:0.2" "watch --color -n 10 zep $DATASET_TO_WATCH
 tmux send-keys -t "$SESSION_NAME:0.3" "clear" C-m
 tmux send-keys -t "$SESSION_NAME:0.3" "cd $SCRIPT_DIR && source sim.sh && cat README.txt" C-m
 
-# Select the main left pane as the active one
-tmux select-pane -t "$SESSION_NAME:0.0"
+# Select the simulator pane as the active one
+tmux select-pane -t "$SESSION_NAME:0.3"
 
 # Attach to the session
 echo "Attaching to tmux session '$SESSION_NAME'..."

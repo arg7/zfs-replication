@@ -35,6 +35,19 @@ config() {
     esac
 }
 
+list() {
+    "$SDIR/zep_replication_tests.sh" --list
+}
+
+log() {
+    local id="${1:-}"
+    if [[ -z "$id" ]]; then
+        id=$(ls -1t /tmp/test[0-9][0-9].log 2>/dev/null | head -1 | grep -o '[0-9][0-9]')
+        [[ -z "$id" ]] && { echo "No logs found."; return 1; }
+    fi
+    less "/tmp/test${id}.log" 2>/dev/null || echo "Log not found: /tmp/test${id}.log"
+}
+
 stop() {
     tmux send-keys -t "${SESSION}:0.0" C-c
     sleep 0.4
