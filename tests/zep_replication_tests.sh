@@ -614,9 +614,12 @@ test_missing_pool() {
     zfs unmount zep-node-3/test-3 2>/dev/null || true
     zpool export zep-node-3
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-    zpool import -f -d /tmp/zep-ramdisk zep-node-3 2>/dev/null || true
     assert_exit "exit !0"  "!0" "$rc"
     assert_out  "pool msg" "$out" "not found"
+    out=$(run_zep "$DS" --alias node1 --status); rc=$?
+    assert_exit "status exit !0" "!0" "$rc"
+    assert_out  "status missing" "$out" "MISSING"
+    zpool import -f -d /tmp/zep-ramdisk zep-node-3 2>/dev/null || true
 }
 
 # ── dispatch ─────────────────────────────────────────────

@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Get node state (internal)
+# Returns: 0=ok, 1=node offline (SSH failed), 2=pool/dataset missing
 get_node_state() {
     local alias="$1"
     local raw_ds="$2"
@@ -15,14 +16,25 @@ get_node_state() {
     local props_arg=""
     [[ -n "$sync_props_data" ]] && props_arg="--sync-props $sync_props_data"
 
-    if [[ "$alias" == "$(get_local_alias "$config_ds" "")" ]]; then
-        output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats "$raw_ds" $props_arg 2>/dev/null)
-    else
-        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "zep --alias $alias --stats $raw_ds $props_arg" 2>/dev/null)
-    fi
+    local is_local=false
+    [[ "$alias" == "$(get_local_alias "$config_ds" "")" ]] && is_local=true
 
-    if [[ -z "$output" ]]; then
-        return 1
+    if [[ "$is_local" == true ]]; then
+        output=$("$ZEPLICATOR_CMD" --alias "$alias" --stats "$raw_ds" $props_arg 2>/dev/null)
+        if [[ -z "$output" ]]; then
+            return 2  # local node but pool/dataset gone
+        fi
+    else
+        local ssh_rc=0
+        output=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${user}@${fqdn}" "zep --alias $alias --stats $raw_ds $props_arg" 2>/dev/null)
+        ssh_rc=$?
+        if [[ -z "$output" ]]; then
+            if [[ $ssh_rc -eq 0 ]]; then
+                return 2  # SSH ok but pool/dataset missing
+            else
+                return 1  # SSH failed — node offline
+            fi
+        fi
     fi
 
     echo "$output"
@@ -172,7 +184,12 @@ cmd_status() {
         
         # Update global exit code
         if [[ "$n_status" == "RED" ]]; then
-            global_exit_code=2
+            if [[ $node_reachable -ne 0 ]]; then
+                # Offline/missing is a warning (exit 1), not critical
+                [[ $global_exit_code -lt 1 ]] && global_exit_code=1
+            else
+                global_exit_code=2
+            fi
         elif [[ "$n_status" == "YELLOW" && $global_exit_code -lt 1 ]]; then
             global_exit_code=1
         fi
@@ -218,7 +235,8 @@ cmd_status() {
         [[ $idx -gt 1 ]] && echo ""
         ping_color=$C_GREEN; [[ "$ping_str" == "down" ]] && ping_color=$C_RED
         echo -e "${c_node}●${C_RESET} $n (${node_fqdn}, ping: ${ping_color}${ping_str}${C_RESET})${n_desc}"
-        [[ $node_reachable -ne 0 ]] && { echo -e "  ${C_RED}  [UNREACHABLE]${C_RESET}"; continue; }
+        [[ $node_reachable -eq 1 ]] && { echo -e "  ${C_RED}  [OFFLINE]${C_RESET}"; continue; }
+        [[ $node_reachable -eq 2 ]] && { echo -e "  ${C_RED}  [MISSING]${C_RESET}"; continue; }
         
         for p_name in $relevant_pools; do
             p_line=$(echo "$zpools" | awk -v p="$p_name" '$1 == p')
