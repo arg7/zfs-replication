@@ -17,10 +17,10 @@ suite in a live, observable environment.
   list                       list available tests
   log                        cat last test log
   log 05                     cat test 05 log
-  start                      run all 16 tests
-  start --test 7 8           run only resilience tests
-  start --test 2 12          run only tests 2 and 12
-  start --skip 5 6           skip resume tests
+  test                       run all tests
+  test --test 7 8            run only resilience tests
+  test --test 2 12           run only tests 2 and 12
+  test --skip 5 6            skip resume tests
   stop                       abort running test suite
   q                          stop tests and exit tmux session
 

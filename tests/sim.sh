@@ -62,13 +62,26 @@ stop() {
     echo "  Test run stopped."
 }
 
-start() {
+start() { test "$@"; }
+
+test() {
     tmux send-keys -t "${SESSION}:0.0" C-c
     sleep 0.4
     tmux send-keys -t "${SESSION}:0.0" "clear" C-m
     sleep 0.1
     tmux send-keys -t "${SESSION}:0.0" "${SDIR}/zep_replication_tests.sh $*" C-m
     echo "  Started: zep_replication_tests.sh $*"
+}
+
+command_not_found_handle() {
+    local cmd="$1"
+    if [[ "$cmd" =~ ^(start|test|stop|log|list|q|config|keystroke)$ ]]; then
+        echo "  ⚠️  '${cmd}' is a simulator command but sim.sh is not sourced."
+        return 127
+    fi
+    echo "  ⚠️  Unknown command: '${*}'"
+    echo "  Type 'log' to see the last test log, or see README.txt."
+    return 127
 }
 
 keystroke() {
