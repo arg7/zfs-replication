@@ -469,13 +469,13 @@ test_resilience_offline() {
     # Set policy=resilience on master
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=resilience </dev/null > /dev/null
 
-    # Isolate node2 (middle in chain: node1→node2→node3, skip + cascade to node3)
+    # Isolate node2 (middle in chain: node1→node2→node3, master skips to node3)
     isolate_node 2
 
     for cycle in 1 2 3; do
         out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
         assert_exit "cycle $cycle exit 3" "3" "$rc"
-        assert_out  "skip node2" "$out" "WARNING: Downstream cascade from node3 failed"
+        assert_out  "skip node2" "$out" "Replication to node2 failed"
     done
 
     # Verify node3 still receives snapshots even though node2 is down
