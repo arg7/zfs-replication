@@ -17,6 +17,17 @@ source "${LIB_DIR}/zfs-alerts.lib.sh"
 source "${LIB_DIR}/zfs-retention.lib.sh"
 source "${LIB_DIR}/zfs-transfer.lib.sh"
 
+# Override library no-op with real alert dispatch
+_on_fatal_error() {
+    [[ -n "$local_ds" ]] || return
+    local msg="$1"
+    local task="${2:-replication}"
+    local stat="${3:-failed}"
+    local detail=""
+    [[ "${4:-}" == "--detail" ]] && detail="--detail"
+    send_smtp_alert "critical" ${detail:+"$detail"} --task "$task" --status "$stat" "ERROR: $msg"
+}
+
 # Initialize default variables
 raw_filesystem=""
 label="frequently"
@@ -1162,6 +1173,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         if [[ "$initial_send" == true ]]; then zfsbud_opts="-i"; fi
         zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"
         ZBUD_STATUS=$?
+        
+        # Moved from zfsbud_core: alert dispatch now lives in orchestrator
+        case $ZBUD_STATUS in
+            2) send_smtp_alert "critical" --detail --task "replication" --status "split-brain detected" "CRITICAL: Split-Brain Data Divergence on $remote_ds" ;;
+        esac
     fi
 
     if [[ $ZBUD_STATUS -eq 0 ]]; then
@@ -1200,6 +1216,10 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
     else
+        case $ZBUD_STATUS in
+            1) send_smtp_alert "warning" --task "replication" --status "no common snapshots" "WARNING: No common snapshots for $local_ds to $remote_ds." ;;
+            6) send_smtp_alert "warning" --task "replication" --status "resume failed" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared." ;;
+        esac
         # DISABLED: Searching chain for a better donor
         # TODO: re-enable donor discovery when ready
         # If the destination currently has a split brain error, local replication likely failed due to

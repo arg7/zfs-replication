@@ -491,6 +491,9 @@ indent_output() {
     sed "s/^/${CHAIN_PREFIX}        /"
 }
 
+# Hook for fatal error alerts — no-op in library, overridden in zeplicator
+_on_fatal_error() { return 0; }
+
 die() {
     local msg="$1"
     local exit_code=${2:-1}
@@ -505,12 +508,10 @@ die() {
     zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} $msg"
 
     if [[ -n "$local_ds" ]]; then
-        if type send_smtp_alert >/dev/null 2>&1; then
-            if [[ -n "$detail_flag" ]]; then
-                send_smtp_alert "critical" --detail --task "replication" --status "failed" "ERROR: $msg"
-            else
-                send_smtp_alert "critical" --task "replication" --status "failed" "ERROR: $msg"
-            fi
+        if [[ -n "$detail_flag" ]]; then
+            _on_fatal_error "$msg" "replication" "failed" "--detail"
+        else
+            _on_fatal_error "$msg" "replication" "failed"
         fi
     fi
     if [[ "$CASCADED" != true ]]; then
@@ -586,9 +587,7 @@ check_stuck_job() {
                 exit 0
             fi
 
-            if type send_smtp_alert >/dev/null 2>&1; then
-                send_smtp_alert "critical" --task "replication" --status "stuck" "CRITICAL: ZFS replication job for $filesystem ($label) is stuck. Lock file: $LOCKFILE. Age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid"
-            fi
+            _on_fatal_error "CRITICAL: ZFS replication job for $filesystem ($label) is stuck. Lock file: $LOCKFILE. Age: $((age/60)) min. Timeout: $((timeout_val/60)) min. PID recorded: $lock_pid" "replication" "stuck"
             die "ERR: Stuck job detected ($age seconds old) at $LOCKFILE. Alert sent."
         else
             zbud_msg "${C_DIM}ℹ️${C_RESET}  Replication already running ($age seconds ago) at $LOCKFILE. PID: $lock_pid. Skipping run."
