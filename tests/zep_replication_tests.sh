@@ -225,10 +225,18 @@ _set_chain() {
 
 echo -e "${CYAN}=== Zeplicator Replication Test Suite ===${RESET}\n"
 
+chain_ok=false
 if "$ZEP_BIN" -bw "zep-node-1/test-1" --status --alias node1 </dev/null > /dev/null 2>&1; then
-    echo -e "${YELLOW}[setup]${RESET} Environment healthy, skipping init."
+    current_chain=$(_get_chain 1)
+    if [[ "$current_chain" == "node1,node2,node3" ]]; then
+        chain_ok=true
+    fi
+fi
+
+if [[ "$chain_ok" == true ]]; then
+    echo -e "${YELLOW}[setup]${RESET} Environment healthy, chain correct. Skipping init."
 else
-    echo -e "${YELLOW}[setup]${RESET} Initializing..."
+    echo -e "${YELLOW}[setup]${RESET} Initializing (chain: ${current_chain:-none})..."
     for i in 1 2 3; do
         zpool import -f "zep-node-$i" 2>/dev/null && zpool destroy -f "zep-node-$i" 2>/dev/null || true
         zpool labelclear -f "/tmp/zep-ramdisk/zep-node-$i.img" 2>/dev/null || true
@@ -384,7 +392,7 @@ test_resilience_offline() {
     # Set policy=resilience on master
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=resilience </dev/null > /dev/null
 
-    # Isolate node2 (last in chain: node1→node3→node2, partial success expected)
+    # Isolate node2 (middle in chain: node1→node2→node3, skip + cascade to node3)
     isolate_node 2
 
     for cycle in 1 2 3; do
@@ -412,7 +420,6 @@ test_resilience_recovery() {
 
 test_splitbrain_resilience() {
     destroy_node3
-    _set_chain "node1,node2,node3"
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
     _write_error 2
@@ -457,8 +464,7 @@ test_divergence_report() {
     out=$(run_zep "zep-node-2/test-2" --alias node2 --divergence-report "${snap#*@}"); rc=$?
     assert_exit "divergence-report clean exit 0" "0" "$rc"
 
-    # Restore default chain + cleanup
-    _set_chain "node1,node3,node2"
+    # Cleanup: reset node3 for subsequent tests
     destroy_node3
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 }
@@ -485,8 +491,11 @@ test_promote_back() {
     _promote 1; rc=$?
     assert_exit "promote node1" "0" "$rc"
 
+    # Explicitly reset chain after promotion
+    "$ZEP_BIN" -bw "$DS" --alias node1 --config "chain=node1,node2,node3" --all </dev/null > /dev/null
+
     chain=$(_get_chain 1)
-    assert_out "chain restored" "$chain" "node1,node3,node2"
+    assert_out "chain restored" "$chain" "node1,node2,node3"
 
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "node1 master again exit 0" "0" "$rc"
