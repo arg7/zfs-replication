@@ -404,7 +404,7 @@ zfsbud_core() {
             send_opt="-v $recursive_send${send_extra:+ $send_extra} \"$latest_snapshot_source\""
             transfer_label="initial: $snap_name"
         else
-            send_opt="-v $recursive_send -i \"$local_ds@$last_snapshot_common\"${send_extra:+ $send_extra} \"$latest_snapshot_source\""
+            send_opt="-v $recursive_send -I \"$local_ds@$last_snapshot_common\"${send_extra:+ $send_extra} \"$latest_snapshot_source\""
             transfer_label="incremental: $last_snapshot_common -> $snap_name"
         fi
     fi
