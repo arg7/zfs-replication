@@ -245,16 +245,19 @@ cmd_status() {
             ping_color=$C_GREEN; [[ "$ping_str" == "down" ]] && ping_color=$C_RED
             echo -e "${C_RED}●${C_RESET} $n (${node_fqdn}, ping: ${ping_color}${ping_str}${C_RESET})"
             local pool_name="${node_ds%%/*}"
-            local pool_exists=false
+            local pool_info=""
             local node_user=$(resolve_node_user "$n" "$raw_filesystem")
             local ssh_t=$(resolve_ssh_timeout "$raw_filesystem")
             if [[ "$n" == "$(get_local_alias "$raw_filesystem" "")" ]]; then
-                zpool list -H -o name "$pool_name" &>/dev/null && pool_exists=true
+                pool_info=$(zpool list -H -o health,capacity "$pool_name" 2>/dev/null)
             else
-                timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${node_user}@${node_fqdn}" "zpool list -H -o name '$pool_name'" &>/dev/null && pool_exists=true
+                pool_info=$(timeout "$ssh_t" ssh -o ConnectTimeout="$ssh_t" -o BatchMode=yes "${node_user}@${node_fqdn}" "zpool list -H -o health,capacity '$pool_name'" 2>/dev/null)
             fi
-            if [[ "$pool_exists" == true ]]; then
-                echo -e "  💾 $pool_name | ONLINE, ?% free"
+            if [[ -n "$pool_info" ]]; then
+                local health=$(echo "$pool_info" | awk '{print $1}')
+                local cap=$(echo "$pool_info" | awk '{print $2}' | tr -d '%')
+                local free_pct=$((100 - cap))
+                echo -e "  💾 $pool_name | $health, ${free_pct}% free"
                 echo -e "    ${C_RED}📁${C_RESET} ${node_ds#*/}  ${C_RED}[MISSING]${C_RESET}"
             else
                 echo -e "  ${C_RED}💾${C_RESET} $pool_name  | ${C_RED}[MISSING]${C_RESET}"
