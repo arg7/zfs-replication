@@ -162,6 +162,9 @@ def show_logs(log_file, filter_arg, oneline, grep_pattern=None):
         print("No alerts found in log.")
         return
 
+    # Reverse: index 0 = latest (most recent), like git log
+    parsed_emails.reverse()
+
     # Apply grep filter if provided
     if grep_pattern:
         filtered = []
