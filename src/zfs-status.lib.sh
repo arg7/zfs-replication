@@ -62,33 +62,64 @@ cmd_status() {
     
     local global_exit_code=0
     local idx=0
+    local tmpdir=$(mktemp -d -t zep-status-XXXXXX)
+    trap "rm -rf $tmpdir" EXIT
+    local pids=()
 
     for n in "${nodes[@]}"; do
         idx=$((idx + 1))
         node_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
         node_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
 
-        # Determine node role
         local node_role="middle"
         [[ $idx -eq 1 ]] && node_role="master"
         [[ $idx -eq ${#nodes[@]} ]] && node_role="sink"
 
-        # Measure ping to node (local node gets "local")
-        local ping_str="local"
-        if [[ "$n" != "$(get_local_alias "$raw_filesystem" "")" ]]; then
-            local ping_ms
-            ping_ms=$(ping -c 1 -W 2 "$node_fqdn" 2>/dev/null | grep -oP 'time[=/]\K[0-9.]+' | head -1 || echo "")
-            if [[ -n "$ping_ms" ]]; then
-                ping_ms=$(printf "%.0f" "$ping_ms")
-                ping_str="${ping_ms}ms"
+        (
+            local ping_str="down"
+            if [[ "$n" != "$(get_local_alias "$raw_filesystem" "")" ]]; then
+                local ping_ms
+                ping_ms=$(ping -c 1 -W 2 "$node_fqdn" 2>/dev/null | grep -oP 'time[=/]\K[0-9.]+' | head -1 || echo "")
+                if [[ -n "$ping_ms" ]]; then
+                    ping_str="$(printf "%.0f" "$ping_ms")ms"
+                else
+                    ping_str="down"
+                fi
             else
-                ping_str="down"
+                ping_str="local"
             fi
-        fi
 
-        out=$(get_node_state "$n" "$node_ds" "$node_role" "$sync_props_data" "$raw_filesystem")
-        
-        node_reachable=$?
+            local out
+            out=$(get_node_state "$n" "$node_ds" "$node_role" "$sync_props_data" "$raw_filesystem")
+            echo "$?" > "$tmpdir/n${idx}.rc"
+            echo "$ping_str" > "$tmpdir/n${idx}.ping"
+            echo "$out" > "$tmpdir/n${idx}.data"
+        ) &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do wait "$pid"; done
+
+    idx=0
+    for n in "${nodes[@]}"; do
+        idx=$((idx + 1))
+        node_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
+        node_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
+
+        local node_role="middle"
+        [[ $idx -eq 1 ]] && node_role="master"
+        [[ $idx -eq ${#nodes[@]} ]] && node_role="sink"
+
+        local ping_str="down"
+        [[ -f "$tmpdir/n${idx}.ping" ]] && ping_str=$(cat "$tmpdir/n${idx}.ping")
+        [[ -z "$ping_str" ]] && ping_str="down"
+
+        local node_reachable=2
+        [[ -f "$tmpdir/n${idx}.rc" ]] && node_reachable=$(cat "$tmpdir/n${idx}.rc")
+        node_reachable=$((node_reachable))
+
+        out=""
+        [[ -f "$tmpdir/n${idx}.data" ]] && out=$(cat "$tmpdir/n${idx}.data")
         
         zpools=$(echo "$out" | grep "^ZPOOL:" | cut -d':' -f2-)
         iostats=$(echo "$out" | grep "^IOSTAT:" | cut -d':' -f2-)
