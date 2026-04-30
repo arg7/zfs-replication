@@ -45,6 +45,8 @@ log() {
         id=$(ls -1t /tmp/test[0-9][0-9]*.log 2>/dev/null | head -1 | sed 's|.*/test||;s|\.log$||')
         [[ -z "$id" ]] && { echo "No logs found."; return 1; }
     fi
+    # Pad bare prefix to 2 digits: "6" -> "06", "6-3" -> "06-3"
+    id=$(echo "$id" | sed -E 's/^([0-9])([^0-9]|$)/0\1\2/')
     less "/tmp/test${id}.log" 2>/dev/null || echo "Log not found: /tmp/test${id}.log"
 }
 
