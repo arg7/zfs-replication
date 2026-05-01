@@ -100,8 +100,6 @@ SUSPEND=false
 RESUME=false
 AUTO=false
 DRY_RUN=false
-VIRTUAL_SNAPS_INCOMING=""
-VIRTUAL_SNAP_CREATED=""
 ALIGN_CHAIN_DATA=false
 YES=false
 PROMOTE_SNAP=""
@@ -143,7 +141,7 @@ while [[ $# -gt 0 ]]; do
         --target) TARGET_NODE="$2"; shift 2 ;;
         --donor) IS_DONOR=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
-        --snap-list) VIRTUAL_SNAPS_INCOMING="$2"; shift 2 ;;
+        --snap-list) shift 2 ;;  # deprecated, kept for backward compat
         --status) STATUS_MODE=true; shift ;;
         --stats) STATS_MODE=true; shift ;;
         --rotate) ROTATE_MODE=true; shift ;;
@@ -268,7 +266,7 @@ if [[ "$DIV_MODE" == true ]]; then
     fi
     # Accept either "snap_name" or "dataset@snap_name" — strip the dataset@ prefix if present
     snap_only="${DIV_COMMON##*@}"
-    divergence_report "$raw_filesystem" "$snap_only"
+    divergence_report "$raw_filesystem" "$snap_only" "$label"
     exit $?
 fi
 
@@ -1089,7 +1087,6 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
 
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
-        VIRTUAL_SNAP_CREATED="$snap_name_base"
     elif zfs list -t snap "$snap_name" >/dev/null 2>&1; then
         # Snapshot already exists — make name unique by adding seconds
         timestamp=$(date -u +%Y-%m-%d-%H%M%S)
@@ -1118,21 +1115,11 @@ fi
 check_stuck_job
 
 LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@${REPL_SNAP_PREFIX}${label}-" | head -n 1 | cut -d'@' -f2)
-if [[ "$DRY_RUN" == true && -n "$VIRTUAL_SNAP_CREATED" ]]; then
-    LATEST_SNAP="$VIRTUAL_SNAP_CREATED"
-fi
 
 # If we are in a cascaded/donor run and still don't have a LATEST_SNAP by label,
 # use the literal latest snapshot available to ensure verification logic has something to check.
 if [[ -z "$LATEST_SNAP" && ( "$CASCADED" == true || "$IS_DONOR" == true ) ]]; then
     LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | head -n 1 | cut -d'@' -f2)
-    # If in dry-run, check virtuals too
-    if [[ "$DRY_RUN" == true ]]; then
-        if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
-            # Use the first one from the incoming list as it's the "newest" from upstream
-            LATEST_SNAP="${VIRTUAL_SNAPS_INCOMING%%,*}"
-        fi
-    fi
 fi
 
 # Check if local dataset has a stale split-brain flag (set by a previous failed send from this node).

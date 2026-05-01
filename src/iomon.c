@@ -8,6 +8,8 @@
 
 #define BUF_SIZE 1024 * 1024
 #define WRITE_CHUNK 1024
+#define IOMON_STATUS_MAXBYTES 142
+#define IOMON_STATUS_TIMEOUT 143
 
 char g_cnt_file[1024];
 unsigned long long g_total_bytes = 0;
@@ -40,8 +42,9 @@ static int parse_rate(const char *s) {
 
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s <lock_file> <interval_sec> [timeout_sec] [write_rate]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <lock_file> <interval_sec> [timeout_sec] [write_rate] [max_bytes]\n", argv[0]);
         fprintf(stderr, "  write_rate: bytes/sec (supports k/M/G suffix), e.g. 16k\n");
+        fprintf(stderr, "  max_bytes: exit after transferring N bytes (supports k/M/G suffix)\n");
         return 1;
     }
 
@@ -49,6 +52,7 @@ int main(int argc, char *argv[]) {
     int interval = atoi(argv[2]);
     int timeout_sec = (argc >= 4) ? atoi(argv[3]) : 0;
     int write_rate = (argc >= 5) ? parse_rate(argv[4]) : 0;
+    int max_bytes = (argc >= 6) ? parse_rate(argv[5]) : 0;
     snprintf(g_cnt_file, sizeof(g_cnt_file), "%s.cnt", lock_base);
 
     signal(SIGTERM, handle_signal);
@@ -56,6 +60,11 @@ int main(int argc, char *argv[]) {
 
     unsigned char *buffer = malloc(BUF_SIZE);
     if (!buffer) return 1;
+
+    if (max_bytes > 0 && max_bytes < BUF_SIZE && max_bytes > 0) {
+        unsigned char *smaller = realloc(buffer, max_bytes);
+        if (smaller) buffer = smaller;
+    }
 
     time_t start_time = time(NULL);
     time_t last_update = 0;
@@ -78,19 +87,19 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "iomon: timeout after %ds\n", timeout_sec);
             write_progress();
             free(buffer);
-            return 143;
+            return IOMON_STATUS_TIMEOUT;
         }
 
         ssize_t bytes_written = 0;
         while (bytes_written < bytes_read) {
             if (timeout_sec > 0 && (time(NULL) - start_time >= timeout_sec)) {
-                fprintf(stderr, "iomon: timeout after %ds\n", timeout_sec);
-                write_progress();
-                free(buffer);
-                return 143;
-            }
+            fprintf(stderr, "iomon: timeout after %ds\n", timeout_sec);
+            write_progress();
+            free(buffer);
+            return IOMON_STATUS_TIMEOUT;
+        }
 
-            ssize_t to_write = bytes_read - bytes_written;
+        ssize_t to_write = bytes_read - bytes_written;
             if (write_rate > 0 && to_write > chunk_size)
                 to_write = chunk_size;
 
@@ -107,6 +116,14 @@ int main(int argc, char *argv[]) {
         }
 
         g_total_bytes += bytes_read;
+
+        if (max_bytes > 0 && g_total_bytes >= (unsigned long long)max_bytes) {
+            fprintf(stderr, "iomon: max-bytes limit after %llu bytes\n", g_total_bytes);
+            write_progress();
+            free(buffer);
+            return IOMON_STATUS_MAXBYTES;
+        }
+
         time_t now = time(NULL);
 
         if (now - last_update >= interval) {

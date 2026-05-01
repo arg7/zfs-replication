@@ -49,16 +49,41 @@ find_best_donor() {
     return 1
 }
 
-# divergence_report — called via: zep <ds> --divergence-report <common_snap>
-# Scans snapshots after the common point for any non-zero written data.
+# divergence_report — called via: zep <ds> --divergence-report <common_snap> [source_data]
+# source_data is optional: pipe-separated shortname=guid pairs from the source node.
 # Prints a divergence report and exits 2 if divergence found, 0 otherwise.
 divergence_report() {
     local ds="$1"
     local common_snap="$2"
+    local source_data="$3"
 
     if [[ -z "$ds" || -z "$common_snap" ]]; then
-        echo "usage: divergence_report <dataset> <common_snapshot>" >&2
+        echo "usage: divergence_report <dataset> <common_snapshot> [source_data]" >&2
         return 1
+    fi
+
+    # --- GUID mismatch check (same name, different GUID) ---
+    if [[ -n "$source_data" ]]; then
+        local dest_snaps guid_mismatch="" name guid
+        dest_snaps=$(zfs list -t snapshot -H -o name,guid "$ds" 2>/dev/null)
+        IFS='|' read -ra pairs <<< "$source_data"
+        for pair in "${pairs[@]}"; do
+            [[ -z "$pair" ]] && continue
+            name="${pair%%=*}"
+            guid="${pair#*=}"
+            [[ -z "$name" || -z "$guid" ]] && continue
+            local dest_guid
+            dest_guid=$(echo "$dest_snaps" | grep "@${name}\b" | awk '{print $2}' | head -1)
+            if [[ -n "$dest_guid" && "$dest_guid" != "$guid" ]]; then
+                guid_mismatch+="    @${name} (src:$guid dst:$dest_guid)\n"
+            fi
+        done
+        if [[ -n "$guid_mismatch" ]]; then
+            echo "GUID_MISMATCH:"
+            echo -e "$guid_mismatch"
+            echo "must destroy these snapshots on destination to overwrite"
+            return 2
+        fi
     fi
 
     # Ensure chronological order (oldest to newest)
@@ -145,6 +170,7 @@ zfsbud_core() {
   local resume=""
 
   local create remove_old send initial recursive_send recursive_create recursive_destroy remote_shell verbose log dry_run snapshot_label destination_parent_filesystem
+  local force_recv=false
   declare -A src_keep_timestamps=() src_kept_timestamps=() dst_keep_timestamps=() dst_kept_timestamps=()
   local source_snapshots=() destination_snapshots=() last_snapshot_common resume_token
 
@@ -185,18 +211,6 @@ zfsbud_core() {
   set_source_snapshots() {
     # format: filesystem@name<tab>guid
     mapfile -t source_snapshots < <(zfs list -H -o name,guid -t snapshot | grep "$1@")
-    if [[ "$DRY_RUN" == true ]]; then
-        if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
-            IFS=',' read -ra v_snaps <<< "$VIRTUAL_SNAPS_INCOMING"
-            for v in "${v_snaps[@]}"; do
-                [[ -z "$v" ]] && continue
-                source_snapshots+=("${1}@${v}\tVIRTUAL")
-            done
-        fi
-        if [[ -n "$VIRTUAL_SNAP_CREATED" ]]; then
-            source_snapshots+=("${1}@${VIRTUAL_SNAP_CREATED}\tVIRTUAL")
-        fi
-    fi
   }
   
   set_destination_snapshots() {
@@ -209,18 +223,6 @@ zfsbud_core() {
         mapfile -t destination_snapshots <<< "$output"
     else
         destination_snapshots=()
-    fi
-    if [[ "$DRY_RUN" == true ]]; then
-        if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
-            IFS=',' read -ra v_snaps <<< "$VIRTUAL_SNAPS_INCOMING"
-            for v in "${v_snaps[@]}"; do
-                [[ -z "$v" ]] && continue
-                destination_snapshots+=("${target_ds}@${v}\tVIRTUAL")
-            done
-        fi
-        if [[ -n "$VIRTUAL_SNAP_CREATED" ]]; then
-            destination_snapshots+=("${target_ds}@${VIRTUAL_SNAP_CREATED}\tVIRTUAL")
-        fi
     fi
     return 0
   }
@@ -240,16 +242,6 @@ zfsbud_core() {
         source_guid=$(echo "$source_line" | awk '{print $2}')
         
         [[ -z "$source_guid" || "$source_guid" == "-" ]] && continue
-        
-        # If both are virtual or one is virtual, we compare names
-        if [[ "$source_guid" == "VIRTUAL" || "$dest_guid" == "VIRTUAL" ]]; then
-            if [[ "${source_snap#*@}" == "${dest_snap#*@}" ]]; then
-               last_snapshot_common="${source_snap#*@}"
-               zbud_msg "  🔍 Found common VIRTUAL snapshot by name: $last_snapshot_common"
-               return 0
-            fi
-            continue
-        fi
 
         if [[ "$source_guid" == "$dest_guid" ]]; then
            last_snapshot_common="${source_snap#*@}"
@@ -339,14 +331,20 @@ zfsbud_core() {
         return 1
     fi
 
-    # 6. Common ground exists — check for divergence on remote
+    # 6. Common ground exists — check for divergence on remote (--init only)
+    if [[ -n "$initial" ]]; then
     local common_snap_name="${last_snapshot_common#*@}"
     if [[ -n "$remote_shell" ]]; then
         local div_output div_rc
-        echo "DBG: send_snapshot div-check remote_shell='$remote_shell' tds='$target_ds'" >> /tmp/dbg.txt
-        div_output=$($remote_shell "zep --divergence-report $common_snap_name $target_ds" 2>&1)
+        local src_data=""
+        for sl in "${source_snapshots[@]}"; do
+            local sn="${sl%%$'\t'*}" sg="${sl##*$'\t'}"
+            [[ -z "$sn" || -z "$sg" || "$sg" == "-" ]] && continue
+            src_data+="${sn##*@}=${sg}|"
+        done
+        src_data="${src_data%|}"
+        div_output=$($remote_shell "zep --divergence-report $common_snap_name $target_ds \"$src_data\"" 2>&1)
         div_rc=$?
-        echo "DBG: div-check rc=$div_rc" >> /tmp/dbg.txt
 
         if [[ $div_rc -eq 2 ]]; then
             echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  DIVERGENCE DETECTED${C_RESET} on $target_ds since snapshot @$common_snap_name"
@@ -369,9 +367,11 @@ zfsbud_core() {
                 fi
             fi
             zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Forcing alignment — remote data since @$common_snap_name will be discarded."
+            force_recv=true
         elif [[ $div_rc -ne 0 ]]; then
             zbud_msg "  ${C_YELLOW}⚠️${C_RESET} Divergence check failed (code $div_rc), proceeding anyway."
         fi
+    fi
     fi
 
     return 0
@@ -403,7 +403,11 @@ zfsbud_core() {
         local latest_line=${source_snapshots[-1]}
         local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
         snap_name="${latest_snapshot_source#*@}"
-        recv_opt="-u -o canmount=noauto${recv_extra:+ $recv_extra}"
+        recv_opt="-u -o canmount=noauto"
+        if [[ "$force_recv" == true ]]; then
+            recv_opt="$recv_opt -F"
+        fi
+        recv_opt="$recv_opt${recv_extra:+ $recv_extra}"
 
         if [[ "$is_initial" == "true" ]]; then
             send_opt="-v $recursive_send${send_extra:+ $send_extra} \"$latest_snapshot_source\""
@@ -441,8 +445,10 @@ zfsbud_core() {
     # --- Build pipeline ---
     local iomon_rate=$(get_zfs_prop "zep:debug:throttle" "$local_ds")
     [[ "$iomon_rate" == "-" ]] && iomon_rate=""
-    log_message "IOMON: lock=$lock_path interval=1 timeout=$iomon_timeout rate=$iomon_rate"
-    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
+    local iomon_max_bytes=$(get_zfs_prop "zep:debug:send_maxbytes" "$local_ds")
+    [[ "$iomon_max_bytes" == "-" ]] && iomon_max_bytes=""
+    log_message "IOMON: lock=$lock_path interval=1 timeout=$iomon_timeout rate=$iomon_rate max_bytes=$iomon_max_bytes"
+    local pipeline="zfs send $send_opt 2>>\"$err_log\" | iomon \"$lock_path\" 1 $iomon_timeout $iomon_rate $iomon_max_bytes | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
     if [[ -n "$remote_shell" ]]; then
         pipeline+=" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_opt $remote_ds\" 2>>\"$err_log\""
     else
@@ -466,7 +472,14 @@ zfsbud_core() {
             hint_msg+="    zfs rollback -r ${remote_ds}@${last_snapshot_common:-?}"
 
             local diff_output=""
-            diff_output=$($remote_shell zep "$remote_ds" --divergence-report "${last_snapshot_common:-}" 2>&1)
+            local src_data=""
+            for sl in "${source_snapshots[@]}"; do
+                local sn="${sl%%$'\t'*}" sg="${sl##*$'\t'}"
+                [[ -z "$sn" || -z "$sg" || "$sg" == "-" ]] && continue
+                src_data+="${sn##*@}=${sg}|"
+            done
+            src_data="${src_data%|}"
+            diff_output=$($remote_shell zep "$remote_ds" --divergence-report "${last_snapshot_common:-}" "$src_data" 2>&1)
             [[ -n "$diff_output" ]] && echo "$diff_output" | while IFS= read -r line; do zbud_msg "  |  $line"; done
 
             zbud_msg ""

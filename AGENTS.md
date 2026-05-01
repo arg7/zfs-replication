@@ -28,7 +28,7 @@ Zeplicator is a modular ZFS replication manager designed for peer-to-peer donor 
   ```bash
   local send_extra=$(get_zfs_prop "zep:zfs:send_opt" "$ds")
   local recv_extra=$(get_zfs_prop "zep:zfs:recv_opt" "$ds")
-  # DEFAULTS: send_opt=""  recv_opt="-F"
+  # DEFAULTS: send_opt=""  recv_opt=""
   ```
   These are injected directly into the pipeline — no boolean-to-flag translation needed.
 

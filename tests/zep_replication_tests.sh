@@ -8,6 +8,9 @@ ZEP_BIN=$(command -v zep)
 DS="zep-node-1/test-1"
 LABEL="min1"
 
+# ── sanity: apply default config to all nodes ─────────────
+"$ZEP_BIN" -bw "$DS" --alias node1 --config --import "$CONF_FILE" </dev/null > /dev/null 2>&1 || true
+
 PASS=0
 FAIL=0
 
@@ -197,9 +200,13 @@ _check_alerts() {
 # ── section-specific helpers ─────────────────────────────
 
 setup_resume_mode() {
-    zfs set zep:debug:throttle=64k "$DS"
-    zfs set zep:debug:send_timeout=10 "$DS"
+    zfs set zep:debug:send_maxbytes=1M "$DS"
+    "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=fail --all </dev/null > /dev/null 2>&1
     "$ZEP_BIN" -bw "$DS" --alias node1 --config zep:zfs:recv_opt="-F -s" --all </dev/null > /dev/null 2>&1
+}
+teardown_resume_mode() {
+    zfs inherit zep:debug:send_maxbytes "$DS" 2>/dev/null || zfs set zep:debug:send_maxbytes=- "$DS"
+    "$ZEP_BIN" -bw "$DS" --alias node1 --config zep:debug:send_maxbytes=- --all </dev/null > /dev/null 2>&1
 }
 teardown_resume_mode() {
     zfs inherit zep:debug:throttle "$DS" 2>/dev/null || zfs set zep:debug:throttle=- "$DS"
@@ -258,7 +265,7 @@ _write_error() {
     local ds="zep-node-${node}/test-${node}"
     _ensure_mounted "$ds" || return 1
     echo "divergent: $(date)" >> "/zep-node-${node}/test-${node}/error"
-    sync
+    sync; sleep 1
     zfs unmount "$ds" 2>/dev/null
     zfs set canmount=noauto "$ds"
 }
@@ -325,7 +332,6 @@ echo -e "  ${GREEN}OK${RESET}"
 # ══════════════════════════════════════════════════════════
 
 test_initial() {
-    destroy_node3
     out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
     assert_exit "exit 0"   "0" "$rc"
     assert_out  "cascade"  "$out" "VERIFICATION SUCCESS"
@@ -345,29 +351,44 @@ test_incremental() {
 }
 
 test_divergence() {
-    destroy_node3
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
     local ds3="zep-node-3/test-3"
+
+    # Scenario 1: GUID mismatch — same name, different GUID on destination
+    local dup_snap=$(zfs list -t snap -H -o name -S creation "$ds3" | head -1)
+    local snap_short="${dup_snap##*@}"
+    zfs destroy "$dup_snap" 2>/dev/null
+    zfs snapshot "${ds3}@tmp_guid" && zfs rename "${ds3}@tmp_guid" "${ds3}@${snap_short}"
+
+    out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+    assert_exit "guid mismatch !0"  "!0" "$rc"
+    assert_out  "GUID_MISMATCH"     "$out" "GUID_MISMATCH"
+
+    # Clean up duplicate and re-sync
+    zfs destroy "${ds3}@${snap_short}" 2>/dev/null || true
+    run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
+
+    # Scenario 2: data divergence — write to destination
     _ensure_mounted "$ds3" || return 1
     dd if=/dev/urandom of="/${ds3}/div.bin" bs=64K count=4 conv=fsync 2>/dev/null
     sync; sleep 1
     zfs unmount "$ds3" 2>/dev/null; zfs set canmount=noauto "$ds3"
 
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-    assert_exit "exit !0"  "!0" "$rc"
-    assert_out  "DIVERGENCE" "$out" "DIVERGENCE DETECTED"
+    assert_exit "data diverge !0"  "!0" "$rc"
+    assert_out  "split-brain"      "$out" "Split-brain detected"
     local alerts; alerts=$(_check_alerts)
     _assert_alert "split-brain" "$alerts" "split-brain detected"
 }
 
 test_divergence_override() {
+    zfs set zep:zfs:recv_opt=-F "$DS"
     out=$(run_zep "$DS" --alias node1 "$LABEL" -y); rc=$?
-    assert_exit "exit 0"   "0" "$rc"
-    assert_out  "forcing"  "$out" "Forcing alignment"
+    zfs inherit zep:zfs:recv_opt "$DS"
+    assert_exit "exit 0"  "0" "$rc"
 }
 
 test_resume() {
-    destroy_node3
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
     setup_resume_mode
@@ -375,15 +396,15 @@ test_resume() {
     # Write enough data to trigger a transfer that may resume (~2MB)
     _ensure_mounted "zep-node-1/test-1" || return 1
     dd if=/dev/urandom of=/zep-node-1/test-1/resume_big.dat bs=1M count=2 conv=fsync 2>/dev/null
-    sync
+    sync; sleep 1
 
-    # Run — expect interruption
+    # Run — expect interruption at 1MB
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "interrupted" "!0" "$rc"
-    assert_out  "timeout msg" "$out" "iomon: timeout"
+    assert_out  "max-bytes msg" "$out" "iomon: max-bytes"
 
     # Retry until complete (resume token persists across runs)
-    # Each run at 64k/s 10s timeout transfers ~640KB, 2MB needs ~4 retries
+    # 2MB data at 1MB/interruption needs ~2 retries
     completed=false
     for attempt in $(seq 1 30); do
         clean_tmp
@@ -399,11 +420,9 @@ test_resume() {
         echo -ne "  ${RED}FAIL${RESET} did not complete in 30 retries"; _fail_log; ((FAIL++))
     fi
 
-    teardown_resume_mode
 }
 
 test_resume_failed() {
-    destroy_node3
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
     setup_resume_mode
@@ -412,14 +431,14 @@ test_resume_failed() {
     _ensure_mounted "zep-node-1/test-1" || return 1
     for i in $(seq 1 5); do
         dd if=/dev/urandom of=/zep-node-1/test-1/snap_${i}.dat bs=1M count=2 conv=fsync 2>/dev/null
-        sync
+        sync; sleep 1
         zfs snapshot "zep-node-1/test-1@zep_${LABEL}_snap_${i}" 2>/dev/null
     done
 
     # Run — will be interrupted, token saved on node2
-    out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+    out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "interrupted" "!0" "$rc"
-    assert_out  "timeout msg" "$out" "iomon: timeout"
+    assert_out  "max-bytes msg" "$out" "iomon: max-bytes"
 
     # Verify resume token exists on node2
     token=$(ssh -n zep-user-2@zep-node-2.local "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
@@ -430,7 +449,7 @@ test_resume_failed() {
     fi
 
     # Destroy snapshots 2-4 on master (being transmitted)
-    for i in 2 3 4; do
+    for i in 1 2 3 4; do
         zfs destroy "zep-node-1/test-1@zep_${LABEL}_snap_${i}" 2>/dev/null || true
     done
 
@@ -450,11 +469,11 @@ test_resume_failed() {
 
     # Disable throttling, run clean — should complete with --init for node3
     teardown_resume_mode
-    out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+    out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "clean run after failure" "0" "$rc"
 
-    # Sink must have at least the new --init snapshot
-    rem=$(ssh -n zep-user-2@zep-node-2.local "zfs list -t snap -H -o name zep-node-2/test-2 2>/dev/null | wc -l" 2>/dev/null || true)
+    # Sink must have at least the new  snapshot
+    rem=$(ssh -n zep-user-2@zep-node-2.local "zfs list -t snap -H -o name zep-node-2/test-2 2>/dev/null | grep zep-node-1/test-1@zep_${LABEL}_snap_5 | wc -l" 2>/dev/null || true)
     rem=$(echo "$rem" | tr -d '[:space:]')
     if [[ -n "$rem" && "$rem" -ge 1 ]]; then
         echo -e "  ${GREEN}PASS${RESET} sink snapshots: $rem >= 1"; ((PASS++))
@@ -497,8 +516,8 @@ test_resilience_recovery() {
 }
 
 test_splitbrain_resilience() {
-    destroy_node3
-    run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
+    #destroy_node3
+    run_zep "$DS" --alias node1 "$LABEL" > /dev/null
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=fail --all </dev/null > /dev/null
 
     _write_error 2

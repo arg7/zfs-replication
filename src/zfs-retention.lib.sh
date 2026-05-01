@@ -45,20 +45,6 @@ resolve_retention() {
     local prefix=$(get_snap_prefix "$ds")
     # Get snapshots matching label, sorted by creation date (newest first)
     mapfile -t snaps < <(zfs list -t snap -H -o name,zep:shipped -S creation -r "$ds" | grep "@${prefix}${lbl}-")
-    
-    if [[ "$DRY_RUN" == true ]]; then
-        # Inject virtual snapshots to simulate accurate count
-        if [[ -n "$VIRTUAL_SNAP_CREATED" && "$VIRTUAL_SNAP_CREATED" == *"$lbl"* ]]; then
-            snaps=("${ds}@${VIRTUAL_SNAP_CREATED}	true" "${snaps[@]}")
-        fi
-
-        if [[ -n "$VIRTUAL_SNAPS_INCOMING" ]]; then
-            IFS=',' read -ra v_incoming <<< "$VIRTUAL_SNAPS_INCOMING"
-            for v in "${v_incoming[@]}"; do
-                [[ "$v" == *"$lbl"* ]] && snaps=("${ds}@${v}	true" "${snaps[@]}")
-            done
-        fi
-    fi
 
     local count=${#snaps[@]}
     if [[ $count -le $k_count ]]; then

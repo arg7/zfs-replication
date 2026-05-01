@@ -33,10 +33,11 @@ declare -A ZEP_PROP_DEFAULTS=(
     ["zep:proc:timeout"]="60"
     ["zep:suspend"]="false"
     ["zep:zfs:send_opt"]=""
-    ["zep:zfs:recv_opt"]="-F"
+    ["zep:zfs:recv_opt"]=""
     ["zep:throttle"]="-"
     ["zep:mbuffer_size"]="1G"
     ["zep:debug:send_delay"]="0"
+    ["zep:debug:send_maxbytes"]="-"
 )
 
 # Populate the property cache for a dataset
