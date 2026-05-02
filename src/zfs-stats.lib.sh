@@ -62,7 +62,7 @@ cmd_stats() {
         prefix=$(echo "$props" | grep "zep:snap_prefix" | cut -f2)
         [[ -z "$prefix" || "$prefix" == "-" ]] && prefix="zep_"
 
-        snap_list=$(zfs list -t snap -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
+        snap_list=$(zfs list -t snapshot -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
         echo "$snap_list" | awk '{print $1}' | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u | while read -r label; do
             [[ -z "$label" ]] && continue
 

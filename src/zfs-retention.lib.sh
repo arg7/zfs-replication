@@ -44,7 +44,7 @@ resolve_retention() {
     
     local prefix=$(get_snap_prefix "$ds")
     # Get snapshots matching label, sorted by creation date (newest first)
-    mapfile -t snaps < <(zfs list -t snap -H -o name,zep:shipped -S creation -r "$ds" | grep "@${prefix}${lbl}-")
+    mapfile -t snapshots < <(zfs list -t snapshot -H -o name,zep:shipped -S creation -r "$ds" | grep "@${prefix}${lbl}-")
 
     local count=${#snaps[@]}
     if [[ $count -le $k_count ]]; then

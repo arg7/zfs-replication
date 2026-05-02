@@ -165,7 +165,32 @@ run_zep() {
     return $rc
 }
 
-destroy_node3() { zfs destroy -r zep-node-3/test-3 2>/dev/null || true; }
+# ── ZFS type detection ────────────────────────────────────
+# zfs-fuse: no kernel module, no zfs allow, no sudo needed
+# kernel ZFS: /sys/module/zfs exists, zfs allow works, sudo for admin ops
+ZFS_FUSE=false
+[[ -d /sys/module/zfs ]] || ZFS_FUSE=true
+
+# ── remote SSH helpers ───────────────────────────────────
+# All ZFS operations on node2/node3 go through SSH.
+# zep-user-$i accounts have delegated ZFS perms (kernel) or raw access (fuse).
+# On zfs-fuse _ssh_node_sudo falls back to _ssh_node (no sudo needed).
+
+_ssh_node() {
+    local node="$1" cmd="$2"
+    ssh -n "zep-user-${node}@zep-node-${node}.local" "$cmd" 2>/dev/null
+}
+
+_ssh_node_sudo() {
+    local node="$1" cmd="$2"
+    if [[ "$ZFS_FUSE" == "true" ]]; then
+        _ssh_node "$node" "$cmd"
+    else
+        ssh -n "zep-user-${node}@zep-node-${node}.local" "sudo $cmd" 2>/dev/null
+    fi
+}
+
+destroy_node3() { _ssh_node 3 "zfs destroy -r zep-node-3/test-3" 2>/dev/null || true; }
 
 _guid_of_snap() {
     local ds="$1" snap="$2"
@@ -174,8 +199,10 @@ _guid_of_snap() {
 
 _verify_guid_on_sink() {
     local desc="$1" expected_guid="$2" sink_ds="$3"
+    local node
+    [[ "$sink_ds" =~ zep-node-([0-9]+)/ ]] && node="${BASH_REMATCH[1]}"
     local found
-    found=$(zfs list -t snap -H -o guid "$sink_ds" 2>/dev/null | grep -c "^${expected_guid}$" || true)
+    found=$(_ssh_node "${node:-3}" "zfs list -t snap -H -o guid ${sink_ds} 2>/dev/null | grep -c '^${expected_guid}\$'" || true)
     if [[ "$found" -ge 1 ]]; then
         echo -e "  ${GREEN}PASS${RESET} $desc (GUID $expected_guid on $sink_ds)"; ((PASS++))
     else
@@ -184,15 +211,16 @@ _verify_guid_on_sink() {
 }
 
 _pre_test_cleanup() {
+    # Sim-only: re-import any exported pools (harmless if already imported)
     for i in 2 3; do
         zpool import -f -d /tmp/zep-ramdisk "zep-node-$i" 2>/dev/null || true
     done
-    zfs destroy -r zep-node-2/test-2 2>/dev/null || true
-    zfs destroy -r zep-node-3/test-3 2>/dev/null || true
+    _ssh_node 2 "zfs destroy -r zep-node-2/test-2" 2>/dev/null || true
+    _ssh_node 3 "zfs destroy -r zep-node-3/test-3" 2>/dev/null || true
     sleep 1
     # Re-ensure pool-level permissions survive dataset destruction
-    zfs allow zep-user-2 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-2 2>/dev/null
-    zfs allow zep-user-3 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-3 2>/dev/null
+    _ssh_node_sudo 2 "zfs allow zep-user-2 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-2" 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs allow zep-user-3 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-3" 2>/dev/null || true
     # Restore all hosts to 127.0.0.1 (undo any prior isolation)
     for i in 1 2 3; do
         sed -i "/zep-node-${i}/d" /etc/hosts
@@ -258,7 +286,6 @@ teardown_resume_mode() {
 
 isolate_node() {
     local node="$1"
-    # Remove from /etc/hosts, then add with unreachable IP
     sed -i "/zep-node-${node}/d" /etc/hosts
     echo "192.0.2.1 zep-node-${node}.local" >> /etc/hosts
 }
@@ -286,14 +313,25 @@ _promote() {
 
 _ensure_mounted() {
     local ds="$1"
-    local mounted
-    mounted=$(zfs get -H -o value mounted "$ds" 2>/dev/null)
+    local node=1
+    [[ "$ds" =~ zep-node-([0-9]+)/ ]] && node="${BASH_REMATCH[1]}"
+
+    local mounted mount_ok=0
+    if [[ "$node" -eq 1 ]]; then
+        mounted=$(zfs get -H -o value mounted "$ds" 2>/dev/null)
+    else
+        mounted=$(_ssh_node "$node" "zfs get -H -o value mounted ${ds}")
+    fi
     if [[ "$mounted" == "yes" ]]; then
         return 0
     fi
-    zfs set canmount=on "$ds" 2>/dev/null
-    if zfs mount "$ds" 2>/dev/null; then
-        sleep 0.5  # let filesystem settle
+    if [[ "$node" -eq 1 ]]; then
+        zfs set canmount=on "$ds" 2>/dev/null && zfs mount "$ds" 2>/dev/null && mount_ok=1
+    else
+        _ssh_node "$node" "zfs set canmount=on ${ds} && zfs mount ${ds}" && mount_ok=1
+    fi
+    if [[ $mount_ok -eq 1 ]]; then
+        sleep 0.5
         return 0
     fi
     echo -ne "  ${RED}FAIL${RESET} $ds not mounted (can't write)"
@@ -306,27 +344,25 @@ _write_error() {
     local node="$1"
     local ds="zep-node-${node}/test-${node}"
     _ensure_mounted "$ds" || return 1
-    echo "divergent: $(date)" >> "/zep-node-${node}/test-${node}/error"
-    sync; sleep 1
-    zfs unmount "$ds" 2>/dev/null
-    zfs set canmount=noauto "$ds"
+    _ssh_node "$node" "echo 'divergent: $(date)' >> '/${ds}/error' && sync && sleep 1"
+    _ssh_node "$node" "zfs unmount ${ds} 2>/dev/null; zfs set canmount=noauto ${ds}"
 }
 
 _rollback_node() {
     local node="$1"
     local snap
-    snap=$(zfs list -t snap -o name -H -S creation "zep-node-${node}/test-${node}" 2>/dev/null | grep '@zep_' | head -1 | cut -d@ -f2)
+    snap=$(_ssh_node "$node" "zfs list -t snap -o name -H -S creation zep-node-${node}/test-${node} 2>/dev/null | grep '@zep_' | head -1 | cut -d@ -f2")
     if [[ -z "$snap" ]]; then
         echo "  ⚠️  No snapshot found on node${node}"
         return 1
     fi
-    zfs rollback -r "zep-node-${node}/test-${node}@${snap}" 2>/dev/null
+    _ssh_node "$node" "zfs rollback -r zep-node-${node}/test-${node}@${snap}" 2>/dev/null
 }
 
 _check_flag() {
     local node="$1" expected="$2"
     local val
-    val=$(zfs get -H -o value "zep:error:split-brain" "zep-node-${node}/test-${node}" 2>/dev/null)
+    val=$(_ssh_node "$node" "zfs get -H -o value zep:error:split-brain zep-node-${node}/test-${node}" 2>/dev/null)
     if [[ "$val" == "$expected" || ("$val" == "-" && "$expected" == "false") ]]; then
         echo -e "  ${GREEN}PASS${RESET} node${node} split-brain = '$val'"
         ((PASS++))
@@ -361,7 +397,8 @@ if [[ "$chain_ok" == true ]]; then
 else
     echo -e "${YELLOW}[setup]${RESET} Initializing (chain: ${current_chain:-none} -> node1,node2,node3)..."
     for i in 1 2 3; do
-        zpool import -f "zep-node-$i" 2>/dev/null && zpool destroy -f "zep-node-$i" 2>/dev/null || true
+        zpool import -f "zep-node-$i" 2>/dev/null || true
+        zpool destroy -f "zep-node-$i" 2>/dev/null || true
         zpool labelclear -f "/tmp/zep-ramdisk/zep-node-$i.img" 2>/dev/null || true
     done
     bash "$SCRIPT_DIR/init.sh" > /dev/null 2>&1 || { echo "  init.sh failed"; exit 1; }
@@ -379,7 +416,13 @@ test_initial() {
     assert_out  "cascade"  "$out" "VERIFICATION SUCCESS"
     assert_out  "shipped"  "$out" "Marking sent snapshot"
     for i in 1 2 3; do
-        cnt=$(zfs list -t snap -H -o name -r zep-node-$i/test-$i 2>/dev/null | grep -c "$LABEL" || true)
+        local ds_n="zep-node-$i/test-$i"
+        local cnt
+        if [[ "$i" -eq 1 ]]; then
+            cnt=$(zfs list -t snap -H -o name -r "$ds_n" 2>/dev/null | grep -c "$LABEL" || true)
+        else
+            cnt=$(_ssh_node "$i" "zfs list -t snap -H -o name -r ${ds_n} 2>/dev/null | grep -c ${LABEL}" || true)
+        fi
         assert_ge "node$i snaps" "$cnt" 1
     done
     local latest_snap guid
@@ -414,24 +457,24 @@ test_divergence() {
     local ds3="zep-node-3/test-3"
 
     # Scenario 1: GUID mismatch — same name, different GUID on destination
-    local dup_snap=$(zfs list -t snap -H -o name -S creation "$ds3" | head -1)
+    local dup_snap=$(_ssh_node 3 "zfs list -t snap -H -o name -S creation ${ds3} | head -1")
     local snap_short="${dup_snap##*@}"
-    zfs destroy "$dup_snap" 2>/dev/null
-    zfs snapshot "${ds3}@tmp_guid" && zfs rename "${ds3}@tmp_guid" "${ds3}@${snap_short}"
+    _ssh_node 3 "zfs destroy ${dup_snap}" 2>/dev/null
+    _ssh_node 3 "zfs snapshot ${ds3}@tmp_guid && zfs rename ${ds3}@tmp_guid ${ds3}@${snap_short}"
 
     out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
     assert_exit "guid mismatch !0"  "!0" "$rc"
     assert_out  "no common ground"   "$out" "no common ground"
 
     # Clean up: destroy node3 dataset, let re-init recreate it
-    zfs destroy -r "${ds3}" 2>/dev/null || true
+    _ssh_node 3 "zfs destroy -r ${ds3}" 2>/dev/null || true
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
     # Scenario 2: data divergence — write to destination
     _ensure_mounted "$ds3" || return 1
-    dd if=/dev/urandom of="/${ds3}/div.bin" bs=64K count=4 conv=fsync 2>/dev/null
-    sync; sleep 1
-    zfs unmount "$ds3" 2>/dev/null; zfs set canmount=noauto "$ds3"
+    _ssh_node 3 "dd if=/dev/urandom of=/${ds3}/div.bin bs=64K count=4 conv=fsync 2>/dev/null"
+    _ssh_node 3 "sync; sleep 1"
+    _ssh_node 3 "zfs unmount ${ds3} 2>/dev/null; zfs set canmount=noauto ${ds3}"
 
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "data diverge !0"  "!0" "$rc"
@@ -444,9 +487,8 @@ test_divergence_override() {
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
     local ds3="zep-node-3/test-3"
     _ensure_mounted "$ds3" || return 1
-    echo "diverged" >> "/${ds3}/div.dat"
-    sync; sleep 1
-    zfs unmount "$ds3" 2>/dev/null; zfs set canmount=noauto "$ds3"
+    _ssh_node 3 "echo diverged >> /${ds3}/div.dat && sync && sleep 1"
+    _ssh_node 3 "zfs unmount ${ds3} 2>/dev/null; zfs set canmount=noauto ${ds3}"
 
     zfs set zep:zfs:recv_opt=-F "$DS"
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
@@ -508,14 +550,14 @@ test_resume_failed() {
     assert_out  "max-bytes msg" "$out" "iomon: max-bytes"
 
     # Verify resume token exists on node2
-    token=$(ssh -n zep-user-2@zep-node-2.local "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
+    token=$(_ssh_node 2 "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
     if [[ "$token" != "-" ]]; then
         echo -e "  ${GREEN}PASS${RESET} resume token saved"; ((PASS++))
     else
         echo -ne "  ${RED}FAIL${RESET} resume token not saved"; _fail_log; ((FAIL++))
     fi
 
-    # Destroy snapshots 2-4 on master (being transmitted)
+    # Destroy snapshots 1-4 on master (being transmitted)
     for i in 1 2 3 4; do
         zfs destroy "zep-node-1/test-1@zep_${LABEL}_snap_${i}" 2>/dev/null || true
     done
@@ -527,7 +569,7 @@ test_resume_failed() {
     assert_out  "token destroyed" "$out" "Destroyed stale resume token"
 
     # Token should be cleared
-    token=$(ssh -n zep-user-2@zep-node-2.local "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
+    token=$(_ssh_node 2 "zfs get -H -o value receive_resume_token zep-node-2/test-2" 2>/dev/null || echo "-")
     if [[ "$token" == "-" ]]; then
         echo -e "  ${GREEN}PASS${RESET} token cleared after failure"; ((PASS++))
     else
@@ -540,7 +582,7 @@ test_resume_failed() {
     assert_exit "clean run after failure" "0" "$rc"
 
     # Sink must have at least the new snapshot
-    rem=$(ssh -n zep-user-3@zep-node-3.local "zfs list -t snap -H -o name zep-node-3/test-3 2>/dev/null | grep -c 'zep_${LABEL}'" 2>/dev/null || true)
+    rem=$(_ssh_node 3 "zfs list -t snap -H -o name zep-node-3/test-3 2>/dev/null | grep -c 'zep_${LABEL}'" 2>/dev/null || true)
     rem=$(echo "$rem" | tr -d '[:space:]')
     if [[ -n "$rem" && "$rem" -ge 1 ]]; then
         echo -e "  ${GREEN}PASS${RESET} sink snapshots: $rem >= 1"; ((PASS++))
@@ -565,7 +607,7 @@ test_resilience_offline() {
     done
 
     # Verify node3 still receives snapshots even though node2 is down
-    snap_cnt=$(zfs list -t snap -H -o name -r zep-node-3/test-3 2>/dev/null | grep -c "$LABEL" || true)
+    snap_cnt=$(_ssh_node 3 "zfs list -t snap -H -o name -r zep-node-3/test-3 2>/dev/null | grep -c ${LABEL}" || true)
     assert_ge "node3 got snaps while node2 offline" "$snap_cnt" 4
 }
 
@@ -630,7 +672,7 @@ test_divergence_report() {
     _write_error 2
 
     local snap
-    snap=$(zfs list -t snap -o name -H -S creation zep-node-2/test-2 2>/dev/null | grep '@zep_' | head -1)
+    snap=$(_ssh_node 2 "zfs list -t snap -o name -H -S creation zep-node-2/test-2 2>/dev/null | grep '@zep_' | head -1")
 
     out=$(run_zep "zep-node-2/test-2" --alias node2 --divergence-report "${snap#*@}"); rc=$?
     assert_exit "divergence-report exit 2" "2" "$rc"
@@ -735,19 +777,19 @@ test_rotate() {
 
 test_foreign_dataset() {
     destroy_node3
-    zfs create zep-node-3/test-3
-    zfs snapshot zep-node-3/test-3@alien_snap
-    zfs set canmount=noauto zep-node-3/test-3
-    zfs unmount zep-node-3/test-3 2>/dev/null || true
-    zfs allow zep-user-3 create,mount,receive,destroy,userprop,diff zep-node-3 2>/dev/null
+    _ssh_node 3 "zfs create zep-node-3/test-3"
+    _ssh_node 3 "zfs snapshot zep-node-3/test-3@alien_snap"
+    _ssh_node 3 "zfs set canmount=noauto zep-node-3/test-3"
+    _ssh_node 3 "zfs unmount zep-node-3/test-3" 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs allow zep-user-3 create,mount,receive,destroy,userprop,diff zep-node-3" 2>/dev/null || true
     out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
     assert_exit "exit !0"  "!0" "$rc"
     assert_out  "FOREIGN"  "$out" "FOREIGN DATASET"
     # cleanup: reset node3 for subsequent tests
     destroy_node3
-    zfs create -o canmount=noauto zep-node-3/test-3
-    zfs unmount zep-node-3/test-3 2>/dev/null || true
-    zfs allow zep-user-3 create,destroy,send,receive,snapshot,hold,release,userprop zep-node-3/test-3 2>/dev/null || true
+    _ssh_node 3 "zfs create -o canmount=noauto zep-node-3/test-3"
+    _ssh_node 3 "zfs unmount zep-node-3/test-3" 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs allow zep-user-3 create,destroy,send,receive,snapshot,hold,release,userprop zep-node-3/test-3" 2>/dev/null || true
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 }
 
@@ -755,26 +797,26 @@ test_missing_perms() {
     destroy_node3
     # re-init so node2+node3 are healthy
     out=$(run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null)
-    zfs unallow zep-user-3 zep-node-3 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs unallow zep-user-3 zep-node-3" 2>/dev/null || true
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "exit !0"  "!0" "$rc"
     assert_out  "perms msg" "$out" "Missing pool permissions"
     # restore
-    zfs allow zep-user-3 create,mount,receive,destroy,userprop,diff zep-node-3 2>/dev/null
-    zfs allow zep-user-3 create,destroy,send,receive,snapshot,hold,release,userprop,diff zep-node-3/test-3 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs allow zep-user-3 create,mount,receive,destroy,userprop,diff zep-node-3" 2>/dev/null || true
+    _ssh_node_sudo 3 "zfs allow zep-user-3 create,destroy,send,receive,snapshot,hold,release,userprop,diff zep-node-3/test-3" 2>/dev/null || true
 }
 
 test_missing_pool() {
     destroy_node3; run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
-    zfs unmount zep-node-3/test-3 2>/dev/null || true
-    zpool export zep-node-3
+    _ssh_node 3 "zfs unmount zep-node-3/test-3" 2>/dev/null || true
+    _ssh_node_sudo 3 "zpool export zep-node-3" 2>/dev/null || true
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
     assert_exit "exit !0"  "!0" "$rc"
     assert_out  "pool msg" "$out" "not found"
     out=$(run_zep "$DS" --alias node1 --status); rc=$?
     assert_exit "status exit !0" "!0" "$rc"
     assert_out  "status missing" "$out" "MISSING"
-    zpool import -f -d /tmp/zep-ramdisk zep-node-3 2>/dev/null || true
+    _ssh_node_sudo 3 "zpool import -f -d /tmp/zep-ramdisk zep-node-3" 2>/dev/null || true
 }
 
 # ── dispatch ─────────────────────────────────────────────

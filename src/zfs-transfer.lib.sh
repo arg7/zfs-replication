@@ -274,8 +274,15 @@ zfsbud_core() {
     # ---- Permission helpers ----
     _check_pool_perms() {
         local user="$1" p="$2"
-        local perms
-        perms=$($remote_shell zfs allow "$p" 2>/dev/null | grep "user $user " | awk '{print $NF}')
+        local perms allow_out allow_rc
+        # On zfs-fuse, zfs allow is unsupported — skip permission check
+        allow_out=$($remote_shell "zfs allow $p" 2>/dev/null) || true
+        allow_rc=$?
+        if [[ $allow_rc -ne 0 ]] || echo "$allow_out" | grep -q "internal error"; then
+            # zfs-fuse or similar: no delegation model, skip check
+            return 0
+        fi
+        perms=$(echo "$allow_out" | grep "user $user " | awk '{print $NF}')
         local missing=()
         for perm in create mount receive userprop; do
             [[ ",$perms," != *",$perm,"* ]] && missing+=("$perm")
@@ -403,7 +410,10 @@ zfsbud_core() {
         local latest_line=${source_snapshots[-1]}
         local latest_snapshot_source=$(echo "$latest_line" | awk '{print $1}')
         snap_name="${latest_snapshot_source#*@}"
-        recv_opt="-u -o canmount=noauto"
+        recv_opt=""
+        if [[ "$ZFS_FUSE_RECV" != "true" ]]; then
+            recv_opt="-u -o canmount=noauto"
+        fi
         if [[ "$force_recv" == true ]]; then
             recv_opt="$recv_opt -F"
         fi

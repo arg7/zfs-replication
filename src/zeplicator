@@ -370,7 +370,7 @@ if [[ "$ROTATE_MODE" == true ]]; then
         label="${label%%-*}"
         [[ -z "$label" ]] && continue
         seen_labels["$label"]=1
-    done < <(zfs list -t snap -H -o name -r "$local_ds" 2>/dev/null | grep "@${prefix}" | cut -d'@' -f2)
+    done < <(zfs list -t snapshot -H -o name -r "$local_ds" 2>/dev/null | grep "@${prefix}" | cut -d'@' -f2)
 
     if [[ ${#seen_labels[@]} -eq 0 ]]; then
         echo "  No snapshots found with prefix '${prefix}'. Nothing to rotate."
@@ -707,9 +707,9 @@ if [[ "$PROMOTE" == true ]]; then
                 node_tmp="/tmp/${REPL_SNAP_PREFIX}${my_hostname}-node-snaps.$$"
                 query_ok=false
                 if [[ "$n" == "$my_hostname" ]]; then
-                    zfs list -t snap -H -o guid -r "${local_ds_target}" 2>/dev/null > "$node_tmp" && query_ok=true
+                    zfs list -t snapshot -H -o guid -r "${local_ds_target}" 2>/dev/null > "$node_tmp" && query_ok=true
                 else
-                    if timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snap -H -o guid -r ${local_ds_target}" 2>/dev/null > "$node_tmp"; then
+                    if timeout "$REPL_SSH_TIMEOUT" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "$node_target" "zfs list -t snapshot -H -o guid -r ${local_ds_target}" 2>/dev/null > "$node_tmp"; then
                         query_ok=true
                     fi
                 fi
@@ -739,10 +739,10 @@ if [[ "$PROMOTE" == true ]]; then
                     if grep -qx "$local_guid" "$tmp_common"; then
                         TARGET_GUID="$local_guid"
                     fi
-                done < <(zfs list -t snap -H -o guid -r "$local_ds")
+                done < <(zfs list -t snapshot -H -o guid -r "$local_ds")
 
                 if [[ -n "$TARGET_GUID" ]]; then
-                    local_info=$(zfs list -t snap -H -o name,guid -r "$local_ds" | grep "$TARGET_GUID" | head -n 1)
+                    local_info=$(zfs list -t snapshot -H -o name,guid -r "$local_ds" | grep "$TARGET_GUID" | head -n 1)
                     TARGET_SNAP=$(echo "$local_info" | awk '{print $1}' | cut -d'@' -f2)
                     target_guid=$(echo "$local_info" | awk '{print $2}')
                     echo "  🔗 Found latest common snapshot: @$TARGET_SNAP"
@@ -915,6 +915,21 @@ if [[ -n "$REPL_CHAIN" ]]; then
             fi
         done
         echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} All nodes verified."
+
+        # Detect zfs-fuse: -u / -o flags are unsupported by zfs-fuse's zfs recv
+        ZFS_FUSE_RECV=false
+        for n in "${nodes[@]}"; do
+            n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
+            n_user=$(resolve_node_user "$n" "$local_ds")
+            test_out=$(timeout "$((REPL_SSH_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "${n_user}@${n_fqdn}" "zfs recv -o canmount=noauto test 2>&1" 2>/dev/null) || true
+            if echo "$test_out" | grep -q "invalid option.*'o'\|invalid option.*o"; then
+                ZFS_FUSE_RECV=true
+                break
+            fi
+        done
+        if [[ "$ZFS_FUSE_RECV" == "true" ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}ℹ️${C_RESET}  zfs-fuse detected on target(s) — normal, disabling unsupported -u/-o recv flags."
+        fi
     fi
 
     NODES_REMAINING=()
@@ -1038,7 +1053,7 @@ if [[ "$IS_MASTER" == false ]]; then
         HB_THRESHOLD_SEC=$(parse_time_to_seconds "$HB_THRESHOLD_RAW")
         
         # 3. Find latest snapshot for label
-        LATEST_SNAP_NAME=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@${REPL_SNAP_PREFIX}${label}-" | head -n 1)
+        LATEST_SNAP_NAME=$(zfs list -t snapshot -o name -H -S creation -r "$local_ds" | grep "@${REPL_SNAP_PREFIX}${label}-" | head -n 1)
         
         if [[ -n "$LATEST_SNAP_NAME" ]]; then
             # 4. Calculate age in seconds
@@ -1087,7 +1102,7 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
 
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
-    elif zfs list -t snap "$snap_name" >/dev/null 2>&1; then
+    elif zfs list -t snapshot "$snap_name" >/dev/null 2>&1; then
         # Snapshot already exists — make name unique by adding seconds
         timestamp=$(date -u +%Y-%m-%d-%H%M%S)
         snap_name_base="${REPL_SNAP_PREFIX}${label}-${timestamp}"
@@ -1114,12 +1129,12 @@ fi
 
 check_stuck_job
 
-LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | grep "@${REPL_SNAP_PREFIX}${label}-" | head -n 1 | cut -d'@' -f2)
+LATEST_SNAP=$(zfs list -t snapshot -o name -H -S creation -r "$local_ds" | grep "@${REPL_SNAP_PREFIX}${label}-" | head -n 1 | cut -d'@' -f2)
 
 # If we are in a cascaded/donor run and still don't have a LATEST_SNAP by label,
 # use the literal latest snapshot available to ensure verification logic has something to check.
 if [[ -z "$LATEST_SNAP" && ( "$CASCADED" == true || "$IS_DONOR" == true ) ]]; then
-    LATEST_SNAP=$(zfs list -t snap -o name -H -S creation -r "$local_ds" | head -n 1 | cut -d'@' -f2)
+    LATEST_SNAP=$(zfs list -t snapshot -o name -H -S creation -r "$local_ds" | head -n 1 | cut -d'@' -f2)
 fi
 
 # Check if local dataset has a stale split-brain flag (set by a previous failed send from this node).
