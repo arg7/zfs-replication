@@ -1165,14 +1165,16 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
                 _now_epoch=$(date +%s)
                 _elapsed=$((_now_epoch - _last_epoch))
 
-                # Heartbeat check: alert if snapshot is older than configured threshold
+                # Heartbeat check: alert if snapshot freshness exceeds late/stale thresholds
                 _hb_raw=$(get_zfs_prop "zep:alert:heartbeat:${label}" "$local_ds")
-                if [[ "$_hb_raw" != "-" ]]; then
-                    _hb_sec=$(parse_time_to_seconds "$_hb_raw")
-                    if [[ $_elapsed -gt $_hb_sec ]]; then
-                        zbud_msg "  ⚠️  Heartbeat missed for label '${label}': latest snapshot is $((_elapsed/60)) min old (threshold: ${_hb_raw})"
-                        send_smtp_alert "warning" --task "heartbeat" --status "missing" "WARNING: Snapshot stall for label '${label}' on '${local_ds}'. Latest snapshot is $((_elapsed/60)) minutes old (threshold: ${_hb_raw})."
-                    fi
+                _hb_min=$(resolve_heartbeat_minutes "$label" "$_hb_raw")
+                _elapsed_min=$((_elapsed / 60))
+                if [[ $_elapsed_min -ge $((_hb_min * 10)) ]]; then
+                    zbud_msg "  🔴 Stale: label '${label}' last snapshot ${_elapsed_min}m ago (threshold: $((_hb_min * 10))m)"
+                    send_smtp_alert "critical" --task "heartbeat" --status "stale" "CRITICAL: Stale snapshots for label '${label}' on '${local_ds}'. Latest snapshot is ${_elapsed_min} minutes old (threshold: $((_hb_min * 10))m)."
+                elif [[ $_elapsed_min -ge $((_hb_min * 5)) ]]; then
+                    zbud_msg "  🟡 Late: label '${label}' last snapshot ${_elapsed_min}m ago (threshold: $((_hb_min * 5))m)"
+                    send_smtp_alert "warning" --task "heartbeat" --status "late" "WARNING: Late snapshots for label '${label}' on '${local_ds}'. Latest snapshot is ${_elapsed_min} minutes old (threshold: $((_hb_min * 5))m)."
                 fi
 
                 if [[ $_elapsed -lt $_label_interval ]]; then

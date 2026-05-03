@@ -252,6 +252,37 @@ parse_label_to_seconds() {
     fi
 }
 
+# resolve_heartbeat_minutes <label> [explicit_value]
+# Returns heartbeat threshold in MINUTES.
+# - If explicit_value is provided and not "-", parse it (30m→30, 2h→120, etc.)
+# - Otherwise, derive from label name (min5→5, hour2→120, etc.)
+# - Falls back to 60 (1 hour) if nothing can be parsed.
+resolve_heartbeat_minutes() {
+    local lbl="$1"
+    local raw="${2:--}"
+    local minutes
+
+    if [[ -n "$raw" && "$raw" != "-" ]]; then
+        if [[ "$raw" =~ ^([0-9]+)m$ ]]; then minutes="${BASH_REMATCH[1]}"
+        elif [[ "$raw" =~ ^([0-9]+)h$ ]]; then minutes=$((${BASH_REMATCH[1]}*60))
+        elif [[ "$raw" =~ ^([0-9]+)d$ ]]; then minutes=$((${BASH_REMATCH[1]}*1440))
+        elif [[ "$raw" =~ ^([0-9]+)M$ ]]; then minutes=$((${BASH_REMATCH[1]}*43200))
+        elif [[ "$raw" =~ ^([0-9]+)Y$ ]]; then minutes=$((${BASH_REMATCH[1]}*525600))
+        elif [[ "$raw" =~ ^([0-9]+)$ ]]; then minutes="${BASH_REMATCH[1]}"
+        else minutes=60
+        fi
+    else
+        if [[ "$lbl" =~ ^min([0-9]+)$ ]]; then minutes="${BASH_REMATCH[1]}"
+        elif [[ "$lbl" =~ ^hour([0-9]+)$ ]]; then minutes=$((${BASH_REMATCH[1]}*60))
+        elif [[ "$lbl" =~ ^day([0-9]+)$ ]]; then minutes=$((${BASH_REMATCH[1]}*1440))
+        elif [[ "$lbl" =~ ^month([0-9]+)$ ]]; then minutes=$((${BASH_REMATCH[1]}*43200))
+        elif [[ "$lbl" =~ ^year([0-9]+)$ ]]; then minutes=$((${BASH_REMATCH[1]}*525600))
+        else minutes=60
+        fi
+    fi
+    echo "$minutes"
+}
+
 format_minutes() {
     local mins="$1"
     [[ -z "$mins" || "$mins" == "-" ]] && { echo "-"; return; }

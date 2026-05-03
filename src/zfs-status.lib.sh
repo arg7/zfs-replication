@@ -149,22 +149,7 @@ cmd_status() {
             [[ -z "$keep_val" ]] && keep_val=0
 
             # Heartbeat Logic
-            if [[ -n "$hb" && "$hb" != "-" ]]; then
-                if [[ "$hb" =~ ^([0-9]+)m$ ]]; then hb="${BASH_REMATCH[1]}";
-                elif [[ "$hb" =~ ^([0-9]+)h$ ]]; then hb=$((${BASH_REMATCH[1]}*60));
-                elif [[ "$hb" =~ ^([0-9]+)d$ ]]; then hb=$((${BASH_REMATCH[1]}*1440));
-                elif [[ "$hb" =~ ^([0-9]+)M$ ]]; then hb=$((${BASH_REMATCH[1]}*43200));
-                elif [[ "$hb" =~ ^([0-9]+)Y$ ]]; then hb=$((${BASH_REMATCH[1]}*525600));
-                elif [[ "$hb" =~ ^([0-9]+)$ ]]; then hb="${BASH_REMATCH[1]}";
-                else hb=60; fi
-            else
-                if [[ "$label" =~ ^min([0-9]+)$ ]]; then hb="${BASH_REMATCH[1]}";
-                elif [[ "$label" =~ ^hour([0-9]+)$ ]]; then hb=$((${BASH_REMATCH[1]}*60));
-                elif [[ "$label" =~ ^day([0-9]+)$ ]]; then hb=$((${BASH_REMATCH[1]}*1440));
-                elif [[ "$label" =~ ^month([0-9]+)$ ]]; then hb=$((${BASH_REMATCH[1]}*43200));
-                elif [[ "$label" =~ ^year([0-9]+)$ ]]; then hb=$((${BASH_REMATCH[1]}*525600));
-                else hb=60; fi
-            fi
+            hb=$(resolve_heartbeat_minutes "$label" "$hb")
             
             c_logic="GREEN"; [[ $age -ge $((hb*5)) ]] && c_logic="YELLOW"; [[ $age -ge $((hb*10)) ]] && c_logic="RED"
             
