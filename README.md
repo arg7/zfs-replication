@@ -182,11 +182,6 @@ zep --fs tank/data --config --export /tmp/zep.conf
 zep --fs tank/data --config --import /tmp/zep.conf
 ```
 
-Shorthand prefixes:
-- `smtp:host` → `zep:smtp_host`
-- `node:n1:fqdn` → `zep:node:n1:fqdn`
-- `role:sink:keep:min1` → `zep:role:sink:keep:min1`
-
 ## Configuration Properties
 
 All properties are ZFS user properties on the dataset prefixed with `zep:`.
@@ -230,7 +225,6 @@ Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 | :--- | :--- | :--- |
 | `zep:policy` | `fail` | `fail` (abort on error) or `resilience` (skip failed nodes). |
 | `zep:suspend` | `false` | Set to `true` to pause master replication chain-wide. |
-| `zep:error:split-brain` | *(unset)* | Set to `true` when split-brain is detected. |
 
 ### Alerting
 
@@ -247,6 +241,24 @@ Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 | `zep:alert:warn:threshold` | `1h` | Rate-limit for warnings. |
 | `zep:alert:info:threshold` | `24h` | Rate-limit for info alerts. |
 | `zep:alert:heartbeat:<label>` | — | Max age before triggering a heartbeat-lost alert (e.g. `2h`). |
+
+### Housekeeping (managed by zep)
+
+| Property | Purpose |
+| :--- | :--- |
+| `zep:shipped` | Set to `true` on snapshots that have reached the chain sink. Rotation purges shipped snapshots first. |
+| `zep:error:split-brain` | Set to `true` on datasets where local writes were detected during receive. Cleared automatically when resolved. |
+| `zep:node:<alias>:last_snapshot` | GUID of the most recent snapshot shipped to that node. Preserved during rotation so temporarily-offline nodes can resume without requiring a donor. |
+
+### Temp Files
+
+| Path | Purpose |
+| :--- | :--- |
+| `/tmp/<prefix>_<alias>-<ds>-<label>.lock` | Per-transfer lock file (PID-stamped, self-healing on stale PIDs). |
+| `/tmp/<prefix>_<alias>-<ds>-<label>.lock.cnt` | Cumulative byte count written by `zpipe` during transfer. |
+| `/tmp/<prefix>_<alias>-<ds>-replication.err` | Captured stderr from the `zfs send \| zfs recv` pipeline. |
+| `/tmp/<prefix>_<alias>-<ds>-replication.hint` | Split-brain recovery hints displayed to the operator. |
+| `/tmp/<prefix>_<alias>-<ds>-repl-alerts/` | Per-dataset rate-limit state for SMTP alerts. |
 
 ## Exit Codes
 
@@ -276,14 +288,28 @@ Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 ## Development
 
 ```bash
-make                    # build/zep + build/zpipe
-bash tests/zep_replication_tests.sh      # run test suite
-bash tests/zep_replication_tests.sh 1    # run specific test
+make                                 # build/zep + build/zpipe
+bash tests/zep_replication_tests.sh  # run full test suite
+bash tests/zep_replication_tests.sh 1   # run test 1 only
 bash tests/zep_replication_tests.sh --list  # list all tests
 ```
 
-Tests simulate a 3-node chain on a single machine using tmpfs ramdisk pools,
-mock DNS, and per-node SSH users. See `tests/README.txt` for details.
+### Test Environment
+
+Tests simulate a 3-node ZFS replication chain on a single machine using:
+
+| Component | Purpose |
+| :--- | :--- |
+| `tests/init.sh` | One-shot setup: creates a tmpfs ramdisk with sparse pool images, per-node ZFS datasets, `zep-user-{1..3}` accounts with delegated permissions, full-mesh SSH keys, and imports `test.conf` as the master config. |
+| `tests/done.sh` | Full teardown: destroys pools, unmounts ramdisk, removes users, cleans `/etc/hosts` and crontab. |
+| `tests/zep_replication_tests.sh` | 20-test suite exercising init, incremental, divergence, split-brain, resume, resilience, promotion, foreign dataset, missing perms/pool, status, rotate, and donor recovery. Supports `--test` and `--skip` filters. |
+| `tests/tzepcon` | Launches a 4-pane tmux session: test output, SMTP debug (`alertcon`), live `zep --status`, and interactive simulator shell. |
+| `build/alertcon` | Python debug SMTP server listening on `127.0.0.1:1025`. Captures all alert emails and serves them via `--log`, `--count`, and `--get` subcommands. |
+| `tests/test.conf` | Central config: pool size, chain order, SMTP settings, alert thresholds. Sourced by `init.sh` and imported into the master dataset via `zep --config --import`. |
+
+The simulated cluster uses mock DNS entries in `/etc/hosts` (`zep-node-{1..3}.local → 127.0.0.1`) and SSH connectivity through local zep-user accounts with delegated ZFS permissions (`zfs allow`).
+
+See `tests/README.txt` for the interactive simulator cheatsheet.
 
 ## Credits
 
