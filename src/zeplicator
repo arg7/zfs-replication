@@ -30,7 +30,8 @@ _on_fatal_error() {
 
 # Initialize default variables
 raw_filesystem=""
-label="frequently"
+label=""
+LABEL_EXPLICIT=false
 keep_fallback="10"
 
 usage() {
@@ -168,7 +169,7 @@ init_colors
 
 # Assign positional arguments
 if [[ ${#positional_args[@]} -gt 0 ]]; then raw_filesystem="${positional_args[0]}"; fi
-if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; fi
+if [[ ${#positional_args[@]} -gt 1 ]]; then label="${positional_args[1]}"; LABEL_EXPLICIT=true; fi
 if [[ ${#positional_args[@]} -gt 2 ]]; then keep_fallback="${positional_args[2]}"; fi
 
 # Set log command tag for per-mode log file names
@@ -994,13 +995,21 @@ if [[ -n "$REPL_CHAIN" ]]; then
         fi
     }
 
-    validate_label "$label" "$local_ds"
+    get_configured_labels() {
+        local ds=$1
+        zfs get all -H "$ds" 2>/dev/null | awk -F'\t' '{print $2}' | grep 'role:.*:keep:' | sed 's/.*role:[a-z]*:keep://' | sort -u
+    }
 
-    dry_flag=""
-    [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+    if [[ -n "$label" ]]; then
+        validate_label "$label" "$local_ds"
+    fi
 
-    RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+    if [[ -n "$label" ]]; then
+        dry_flag=""
+        [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
+        echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+        RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+    fi
     fi
 
 if [[ -n "$TARGET_NODE" ]]; then
@@ -1033,13 +1042,15 @@ if [[ -n "$TARGET_NODE" ]]; then
         fi
     }
 
-    validate_label_p2p "$label" "$local_ds"
+    if [[ -n "$label" ]]; then
+        validate_label_p2p "$label" "$local_ds"
 
-    dry_flag=""
-    [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label (target: $TARGET_NODE)"
-    RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
-    echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP"
+        dry_flag=""
+        [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
+        echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label (target: $TARGET_NODE)"
+        RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+        echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP"
+    fi
 fi
 
 # --- HEARTBEAT MONITORING LOGIC ---
@@ -1092,7 +1103,29 @@ if [[ "$MARK_ONLY" == true ]]; then
     exit 0
 fi
 
+# ── Label discovery (when no label explicitly provided) ──
+_labels=()
+_worst_exit=0
+if [[ "$LABEL_EXPLICIT" != true && "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
+    _labels=($(get_configured_labels "$local_ds"))
+    if [[ ${#_labels[@]} -eq 0 ]]; then
+        die "ERR: No labels with retention policies configured on $local_ds"
+    fi
+    echo -e "  ℹ️  No label specified — replicating all configured: ${_labels[*]}"
+else
+    _labels=("$label")
+fi
+
+for label in "${_labels[@]}"; do
+
 filesystem="$local_ds"
+
+if [[ "$LABEL_EXPLICIT" != true ]]; then
+    dry_flag=""
+    [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
+    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+    RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
+fi
 
 # 1. Snapshot creation (Master only)
 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
@@ -1382,7 +1415,8 @@ if [[ "$REPLICATION_SUCCESS" == true ]]; then
         fi
     fi
 elif [[ "$exit_code" -ne 0 && "$HAD_SPLIT_BRAIN" != true ]]; then
-    die "ERR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}" $exit_code
+    echo "${CHAIN_PREFIX}  ❌ ERROR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}"
+    exit_code=${exit_code:-1}
 else
     if [[ "$IS_DONOR" == true ]]; then
         echo "${CHAIN_PREFIX}  ℹ️  Donor run complete."
@@ -1390,6 +1424,14 @@ else
         echo "${CHAIN_PREFIX}  🏁 End of chain ($ME). Reporting state."
     fi
 fi
+
+    # Track worst exit code across labels
+    if [[ "$exit_code" -gt "$_worst_exit" ]]; then
+        _worst_exit="$exit_code"
+    fi
+done
+
+exit_code=$_worst_exit
 
 dry_done=""
 [[ "$DRY_RUN" == true ]] && dry_done=" [DRY RUN]"

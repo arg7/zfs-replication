@@ -7,6 +7,7 @@ CONF_FILE="$SCRIPT_DIR/test.conf"
 ZEP_BIN=$(command -v zep)
 DS="zep-node-1/test-1"
 LABEL="min1"
+HOUR_LABEL="hour1"
 
 # ── sanity: apply default config to all nodes ─────────────
 "$ZEP_BIN" -bw "$DS" --alias node1 --config --import "$CONF_FILE" </dev/null > /dev/null 2>&1 || true
@@ -448,7 +449,7 @@ _ensure_alertcon
 test_initial() {
     local _before_guid
     _before_guid=$(_latest_master_guid)
-    out=$(run_zep "$DS" --alias node1 "$LABEL" --init); rc=$?
+    out=$(run_zep "$DS" --alias node1 --init); rc=$?
     assert_exit "exit 0"   "0" "$rc"
     assert_out  "cascade"  "$out" "VERIFICATION SUCCESS"
     assert_out  "shipped"  "$out" "Marking sent snapshot"
