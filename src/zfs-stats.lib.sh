@@ -63,7 +63,8 @@ cmd_stats() {
         [[ -z "$prefix" || "$prefix" == "-" ]] && prefix="zep_"
 
         snap_list=$(zfs list -t snapshot -o name,creation -p -H -S creation -r "$ds" 2>/dev/null | grep "@$prefix")
-        echo "$snap_list" | awk '{print $1}' | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u | while read -r label; do
+        snap_labels=$(echo "$snap_list" | awk '{print $1}' | cut -d"@" -f2 | sed -E "s/^$prefix//" | cut -d"-" -f1 | sort -u)
+        while read -r label; do
             [[ -z "$label" ]] && continue
 
             is_configured="false"
@@ -93,6 +94,19 @@ cmd_stats() {
                     echo "FILESYSTEM|$ds|$label|$snap_name|$age|$is_configured|$heartbeat|$has_sb|$snap_count|$keep_val"
                 fi
             fi
+        done <<< "$snap_labels"
+
+        # Emit entries for configured labels with zero snapshots
+        cfg_labels=$(echo "$props" | grep "role:.*:keep:" | cut -f1 | sed 's/.*:keep://' | sort -u)
+        for c_label in $cfg_labels; do
+            [[ -z "$c_label" ]] && continue
+            echo "$snap_labels" | grep -qx "$c_label" && continue
+            heartbeat=$(echo "$props" | grep ":alert:heartbeat:${c_label}" | cut -f2)
+            keep_val=""
+            [[ -n "$_node_role" ]] && keep_val=$(echo "$props" | grep "role:${_node_role}:keep:${c_label}" | head -n 1 | cut -f2)
+            [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=$(echo "$props" | grep "role:.*:keep:${c_label}" | head -n 1 | cut -f2)
+            [[ -z "$keep_val" || "$keep_val" == "-" ]] && keep_val=0
+            echo "FILESYSTEM|$ds|$c_label||0|true|$heartbeat|false|0|$keep_val"
         done
     done
 

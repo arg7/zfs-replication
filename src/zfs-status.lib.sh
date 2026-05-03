@@ -270,7 +270,7 @@ cmd_status() {
         [[ $idx -gt 1 ]] && echo ""
 
         if [[ $node_reachable -eq 1 ]]; then
-            echo -e "${C_RED}●${C_RESET} $n ${C_RED}[OFFLINE]${C_RESET}"
+            echo -e "${C_RED}●${C_RESET} $n (${node_fqdn}, ${C_RED}[OFFLINE]${C_RESET})"
             continue
         elif [[ $node_reachable -eq 2 ]]; then
             ping_color=$C_GREEN; [[ "$ping_str" == "down" ]] && ping_color=$C_RED
@@ -373,6 +373,11 @@ cmd_status() {
                     IFS='|' read -r _ ds_f label_f _ age_f conf_f hb_f has_sb_f snap_count keep_val c_logic ret_pct ret_color <<< "$line"
 
                     [[ "$configured_only" == "true" && "$conf_f" == "false" ]] && continue
+
+                    if [[ "$snap_count" -eq 0 && "$conf_f" == "true" ]]; then
+                        echo -e "      - ${C_RED}●${C_RESET} ${label_f}(0) ${C_RED}[missing]${C_RESET}"
+                        continue
+                    fi
 
                     age_str=$(format_minutes "$age_f")
                     [[ -z "$snap_count" ]] && snap_count=0

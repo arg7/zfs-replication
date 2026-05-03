@@ -777,8 +777,9 @@ test_rotate() {
 
 test_lost_common_donor() {
     # Scenario: node2 goes offline, master replicates to node3 with aggressive
-    # rotation (keep=2). When node2 returns, master has lost common ground.
-    # Donor search must find node3 to heal node2, then retry local replication.
+    # rotation (keep=2). Node2's last_snapshot GUID is preserved on master and sink
+    # as common ground. When node2 returns, replication succeeds directly (no donor
+    # needed because common ground was never lost).
 
     run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
 
@@ -815,21 +816,26 @@ test_lost_common_donor() {
         assert_ge "sink preserved node2 last_snapshot GUID" "$found_guid" 1
     fi
 
+    # Get latest snapshot GUID on master before recovery
+    local latest_master_guid
+    latest_master_guid=$(zfs list -t snap -H -o guid -S creation -r "$DS" 2>/dev/null | head -1)
+
     # Restore node2
     restore_node 2
     sleep 1
 
-    # Master tries to replicate to node2 → no common ground → donor search
-    # Should find node3 as donor → node3 heals node2 → master retries → cascade
+    # Master replicates to node2: common ground is preserved, so direct replication
+    # succeeds without donor search. Cascade propagates to node3 (sink).
     out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
-    assert_exit "donor recovery exit 0"  "0" "$rc"
-    assert_out  "donor found"           "$out" "Found donor peer"
-    assert_out  "retry successful"      "$out" "Local replication retry successful"
-    assert_out  "cascade ok"            "$out" "VERIFICATION SUCCESS"
+    assert_exit "recovery exit 0"    "0"  "$rc"
+    assert_out  "replication ok"     "$out" "Replication to zep-user-2@"
+    assert_out  "cascade ok"         "$out" "VERIFICATION SUCCESS"
 
-    # Verify node2 caught up to all snapshots
-    local node2_snaps=$(_ssh_node 2 "zfs list -t snap -H -o name -r zep-node-2/test-2 2>/dev/null | grep -c ${LABEL}" || true)
-    assert_ge "node2 caught up" "$node2_snaps" 9
+    # Latest snapshot on master after recovery must match sink (node3)
+    latest_master_guid=$(zfs list -t snap -H -o guid -S creation -r "$DS" 2>/dev/null | head -1)
+    local latest_sink_guid
+    latest_sink_guid=$(_ssh_node 3 "zfs list -t snap -H -o guid -S creation -r zep-node-3/test-3 2>/dev/null | head -1" || true)
+    assert_eq "latest snap on sink matches master" "$latest_master_guid" "$latest_sink_guid"
 
     # Reset retention and policy for subsequent tests
     zfs set "zep:role:master:keep:${LABEL}=10" "$DS"

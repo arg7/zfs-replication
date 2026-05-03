@@ -1260,6 +1260,9 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         else
             echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
         fi
+    elif [[ $ZBUD_STATUS -eq 255 ]]; then
+        send_smtp_alert "warning" --detail --task "replication" --status "node unreachable" "WARNING: Node $hop_node ($HOP_TARGET) is unreachable. SSH connection failed."
+        echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Node $hop_node is unreachable."
     else
         [[ $ZBUD_STATUS -eq 6 ]] && send_smtp_alert "warning" --task "replication" --status "resume failed" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared."
     fi

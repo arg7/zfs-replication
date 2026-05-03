@@ -57,10 +57,13 @@ purge_shipped_snapshots() {
     # When a node goes offline, its last_snapshot entry stays frozen;
     # every node in the chain must preserve these snapshots as common ground.
     local -A protected_guids
+    local -A guid_to_node
     while IFS= read -r prop_line; do
         [[ -z "$prop_line" ]] && continue
-        local p_guid="${prop_line#*=}"
-        [[ -n "$p_guid" && "$p_guid" != "-" ]] && protected_guids["$p_guid"]=1
+        local p_node="${prop_line%:last_snapshot*}"
+        p_node="${p_node##*:node:}"
+        local p_guid="${prop_line##*$'\t'}"
+        [[ -n "$p_guid" && "$p_guid" != "-" ]] && protected_guids["$p_guid"]=1 && guid_to_node["$p_guid"]="$p_node"
     done < <(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:node:" | grep "last_snapshot")
 
     if [[ ${#protected_guids[@]} -gt 0 ]]; then
@@ -75,6 +78,7 @@ purge_shipped_snapshots() {
 
     local purged_count=0
     local kept_last_shipped=false
+    local alerted_protected=false
     # Process snapshots from index k_count (0-indexed), newest first within purge range
     for (( i=k_count; i<count; i++ )); do
         local line="${snapshots[i]}"
@@ -82,6 +86,13 @@ purge_shipped_snapshots() {
 
         # Never purge a snapshot that is a per-node last_snapshot (common ground)
         if [[ -n "${protected_guids[$snap_guid]+x}" ]]; then
+            if [[ "$alerted_protected" != "true" ]]; then
+                local _saved_fs="${filesystem:-}"
+                filesystem="$ds"
+                send_smtp_alert "warning" --task "rotation" --status "last_snapshot at risk" "WARNING: Common-ground snapshot for node ${guid_to_node[$snap_guid]} is outside retention window on $ds (label: $lbl, keep: $k_count). Consider increasing keep count."
+                [[ -n "$_saved_fs" ]] && filesystem="$_saved_fs" || unset filesystem
+                alerted_protected=true
+            fi
             echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING protected last_snapshot: $snap_name (GUID: $snap_guid)"
             kept_last_shipped=true
             newer_shipped=true
