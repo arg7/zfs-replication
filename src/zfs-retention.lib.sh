@@ -44,12 +44,27 @@ purge_shipped_snapshots() {
 
     local prefix=$(get_snap_prefix "$ds")
     # Get snapshots matching label, sorted by creation date (newest first)
-    mapfile -t snapshots < <(zfs list -t snapshot -H -o name,zep:shipped -S creation -r "$ds" | grep "@${prefix}${lbl}-")
+    # Include GUID in output for last_snapshot protection check
+    mapfile -t snapshots < <(zfs list -t snapshot -H -o name,zep:shipped,guid -S creation -r "$ds" | grep "@${prefix}${lbl}-")
 
     local count=${#snapshots[@]}
     if [[ $count -le $k_count ]]; then
         echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Snapshot count ($count) is within limit ($k_count). Skipping purge."
         return
+    fi
+
+    # Collect protected GUIDs from per-node last_snapshot properties.
+    # When a node goes offline, its last_snapshot entry stays frozen;
+    # every node in the chain must preserve these snapshots as common ground.
+    local -A protected_guids
+    while IFS= read -r prop_line; do
+        [[ -z "$prop_line" ]] && continue
+        local p_guid="${prop_line#*=}"
+        [[ -n "$p_guid" && "$p_guid" != "-" ]] && protected_guids["$p_guid"]=1
+    done < <(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:node:" | grep "last_snapshot")
+
+    if [[ ${#protected_guids[@]} -gt 0 ]]; then
+        echo -e "${CHAIN_PREFIX}  ${C_DIM}ℹ️${C_RESET}  Protecting ${#protected_guids[@]} snapshot(s) as per-node last_snapshot."
     fi
 
     # Check if any snapshot in the KEEP range has shipped — if so, older unshipped snaps are safe to remove
@@ -63,7 +78,15 @@ purge_shipped_snapshots() {
     # Process snapshots from index k_count (0-indexed), newest first within purge range
     for (( i=k_count; i<count; i++ )); do
         local line="${snapshots[i]}"
-        read -r snap_name shipped_val <<< "$line"
+        read -r snap_name shipped_val snap_guid <<< "$line"
+
+        # Never purge a snapshot that is a per-node last_snapshot (common ground)
+        if [[ -n "${protected_guids[$snap_guid]+x}" ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING protected last_snapshot: $snap_name (GUID: $snap_guid)"
+            kept_last_shipped=true
+            newer_shipped=true
+            continue
+        fi
 
         if [[ "$shipped_val" == "true" ]]; then
             if [[ "$kept_last_shipped" == false ]]; then

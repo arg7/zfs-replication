@@ -1269,6 +1269,17 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
 
     if [[ "$TRANSFER_DONE" == true ]]; then
         REPLICATION_SUCCESS=true
+
+        # Record last-shipped snapshot GUID for this node.
+        # When a node goes offline, its entry stays frozen, and rotation
+        # on sink/middle nodes uses it to preserve common-ground snapshots.
+        if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$DRY_RUN" != true && -n "$LATEST_SNAP" ]]; then
+            local _ls_guid
+            _ls_guid=$(zfs get -H -o value guid "$local_ds@$LATEST_SNAP" 2>/dev/null)
+            if [[ -n "$_ls_guid" && "$_ls_guid" != "-" ]]; then
+                zfs set "zep:node:${hop_node}:last_snapshot=$_ls_guid" "$local_ds"
+            fi
+        fi
         
         if [[ "$initial_send" == true ]]; then
             send_smtp_alert "info" --detail --task "initial replication" --status "successful" "SUCCESS: Initial replication of $local_ds completed successfully to $hop_node ($HOP_TARGET)."
@@ -1307,6 +1318,16 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ $SSH_STATUS -eq 0 ]]; then
                 echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ VERIFICATION SUCCESS:${C_RESET} Downstream cascade for $local_ds on $HOP_TARGET completed successfully."
                 CASCADE_VERIFIED=true
+                # Record last_snapshot for all cascaded downstream nodes
+                if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$DRY_RUN" != true && -n "$LATEST_SNAP" ]]; then
+                    local _cs_guid
+                    _cs_guid=$(zfs get -H -o value guid "$local_ds@$LATEST_SNAP" 2>/dev/null)
+                    if [[ -n "$_cs_guid" && "$_cs_guid" != "-" ]]; then
+                        for (( _ci=hop_idx; _ci<${#NODES_REMAINING[@]}; _ci++ )); do
+                            zfs set "zep:node:${NODES_REMAINING[$_ci]}:last_snapshot=$_cs_guid" "$local_ds"
+                        done
+                    fi
+                fi
             else
                 echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
                 REPLICATION_PARTIAL=true

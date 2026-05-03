@@ -787,8 +787,9 @@ test_lost_common_donor() {
     crontab -l 2>/dev/null | sed 's/^\(.*--rotate.*\)/#\1/' | crontab -
     trap '[[ -n "$cron_saved" ]] && echo "$cron_saved" | crontab -' RETURN
 
-    # Set aggressive retention on master (keep=2) so rotation prunes old snaps
+    # Set aggressive retention (keep=2) on master AND sink so rotation prunes aggressively
     zfs set "zep:role:master:keep:${LABEL}=2" "$DS"
+    zfs set "zep:role:sink:keep:${LABEL}=2"   "zep-node-3/test-3" 2>/dev/null || true
 
     # Enable resilience so master skips offline node2 and goes to node3
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=resilience </dev/null > /dev/null
@@ -796,12 +797,23 @@ test_lost_common_donor() {
     # Isolate node2
     isolate_node 2
 
-    # Run many cycles: master creates snaps, ships to node3, rotates old shipped
-    # Node2 never receives them — its last common snapshot with master gets purged
+    # Run many cycles: master creates snaps, ships to node3, rotates old shipped.
+    # Also rotate on node3 (sink) to verify it preserves node2's last_snapshot.
+    # Node2 never receives them — its last_snapshot freezes and must survive rotation.
     for cycle in $(seq 1 8); do
         run_zep "$DS" --alias node1 "$LABEL" > /dev/null
         run_zep "$DS" --alias node1 --rotate > /dev/null
+        run_zep "zep-node-3/test-3" --alias node3 --rotate > /dev/null
     done
+
+    # Verify node3 still preserves node2's last common snapshot (init GUID)
+    local node2_last_guid
+    node2_last_guid=$(zfs get -H -o value "zep:node:node2:last_snapshot" "$DS" 2>/dev/null)
+    if [[ -n "$node2_last_guid" && "$node2_last_guid" != "-" ]]; then
+        local found_guid
+        found_guid=$(_ssh_node 3 "zfs list -t snap -H -o guid -r zep-node-3/test-3 2>/dev/null | grep -c '^${node2_last_guid}\$'" || true)
+        assert_ge "sink preserved node2 last_snapshot GUID" "$found_guid" 1
+    fi
 
     # Restore node2
     restore_node 2
@@ -821,6 +833,7 @@ test_lost_common_donor() {
 
     # Reset retention and policy for subsequent tests
     zfs set "zep:role:master:keep:${LABEL}=10" "$DS"
+    zfs inherit "zep:role:sink:keep:${LABEL}" "zep-node-3/test-3" 2>/dev/null || true
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=fail </dev/null > /dev/null
 }
 
