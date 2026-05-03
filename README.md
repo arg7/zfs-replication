@@ -213,7 +213,7 @@ Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 | Property | Default | Description |
 | :--- | :--- | :--- |
 | `zep:zfs:send_opt` | *(none)* | Extra `zfs send` flags (e.g. `-w`, `-L`). |
-| `zep:zfs:recv_opt` | `-F` | Extra `zfs recv` flags. |
+| `zep:zfs:recv_opt` | *(none)* | Extra `zfs recv` flags. `-F` is added automatically when force mode is active. |
 | `zep:throttle` | *(none)* | Bandwidth limit for `mbuffer` (e.g. `100M`). |
 | `zep:mbuffer_size` | `64M` | `mbuffer` in-memory buffer. |
 | `zep:ssh:timeout` | `10` | SSH connect timeout (seconds). |

@@ -122,7 +122,7 @@ ZEP_PROP_DEFAULTS            Pre-seeded fallback values for commonly-unset props
 | `zep:throttle` | Bandwidth limit |
 | `zep:mbuffer_size` | mbuffer buffer size |
 | `zep:zfs:send_opt` | Extra zfs send flags |
-| `zep:zfs:recv_opt` | Extra zfs recv flags (default: `-F`) |
+| `zep:zfs:recv_opt` | Extra zfs recv flags (default: none; `-F` added automatically when force mode is active) |
 
 ---
 
@@ -140,7 +140,7 @@ zfs send [flags] 2>>err_log \
 
 ### Send/Recv Flags
 
-User-configurable via `zep:zfs:send_opt` (default empty) and `zep:zfs:recv_opt` (default `-F`). Injected directly — no boolean-to-flag translation.
+User-configurable via `zep:zfs:send_opt` (default empty) and `zep:zfs:recv_opt` (default empty; `-F` injected automatically when needed). Injected directly — no boolean-to-flag translation.
 
 Three send modes based on context:
 - **Resume**: `zfs send -v -t <token>` + `zfs recv -u`
