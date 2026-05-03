@@ -22,9 +22,13 @@ become master.
 - **Split-brain detection** — if the destination has been modified locally, the
   pipeline aborts before overwriting data. A critical SMTP alert fires and the
   `zep:error:split-brain` property is set.
-- **Donor discovery** — when a downstream node's common ground is lost, the next
-  upstream node searches the entire chain for a suitable donor to re-establish the
-  replication path.
+- **Donor discovery & recovery** — when a downstream node's common ground is lost,
+  the next upstream node searches the entire chain for a suitable donor to re-
+  establish the replication path without a full re-init.
+- **Common-ground preservation** — the GUID of the last snapshot shipped to each
+  downstream node is stored in `zep:node:<alias>:last_snapshot`. Rotation on the
+  master and sink preserves these snapshots so a returning node can always find
+  common ground, avoiding unnecessary donor searches.
 - **Resilience mode** — with `zep:policy=resilience`, unreachable or split-brain
   nodes are skipped and the chain continues. Exit code 3 signals partial success.
 - **Graduated retention** — per-role retention counts (`master`, `middle`, `sink`)
