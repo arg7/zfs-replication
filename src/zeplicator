@@ -44,7 +44,8 @@ Usage:
 Positional Arguments:
   <filesystem>         The ZFS filesystem to replicate (e.g., tank/data).
                     Can be a remote alias if 'zep:node:<alias>:fs' is set.
-  [label]           Snapshot label to filter/create (default: frequently).
+  [label]           Snapshot label to filter/create. If omitted, all configured
+                    labels (from zep:role:*:keep:*) are replicated in sequence.
   [keep_fallback]   Default number of snapshots to keep if not configured (default: 10).
 
 Primary Flags:
@@ -53,6 +54,8 @@ Primary Flags:
   --auto            Automatically resolve latest common snapshot during promotion.
   --promote         Promote the local node to Master in the replication chain.
   --init            Perform an initial replication (uses full stream, mbuffer/zstd).
+  --now             Force snapshot creation for all labels immediately, bypassing
+                    the per-label time-interval check.
   --suspend/resume  Suspend or resume replication across the entire chain.
   --config          Enter configuration mode to view/set/clear 'zep:' ZFS properties.
   --status          Probe and display system status for the replication chain.
@@ -141,6 +144,7 @@ while [[ $# -gt 0 ]]; do
         --sync-props) sync_props_data="$2"; shift 2 ;;
         --target) TARGET_NODE="$2"; shift 2 ;;
         --donor) IS_DONOR=true; shift ;;
+        --now) NOW_MODE=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --snap-list) shift 2 ;;  # deprecated, kept for backward compat
         --status) STATUS_MODE=true; shift ;;
@@ -1129,6 +1133,22 @@ fi
 
 # 1. Snapshot creation (Master only)
 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
+    # Time-interval check: skip label if not enough time since last snapshot
+    if [[ "$initial_send" != true && "$NOW_MODE" != true ]]; then
+        _label_interval=$(parse_label_to_seconds "$label")
+        _last_snap=$(zfs list -t snap -H -o name -S creation -r "$local_ds" 2>/dev/null | grep "@${REPL_SNAP_PREFIX}${label}-" | head -1)
+        if [[ -n "$_last_snap" ]]; then
+            _last_snap_ts=$(zfs get -H -o value creation "$_last_snap" 2>/dev/null)
+            _last_epoch=$(date -d "$_last_snap_ts" +%s 2>/dev/null || echo 0)
+            _now_epoch=$(date +%s)
+            _elapsed=$((_now_epoch - _last_epoch))
+            if [[ $_elapsed -lt $_label_interval ]]; then
+                echo "${CHAIN_PREFIX}  ⏭️  Label $label: last snapshot ${_elapsed}s ago (interval: ${_label_interval}s). Skipping."
+                continue
+            fi
+        fi
+    fi
+
     timestamp=$(date -u +%Y-%m-%d-%H%M)
     snap_name_base="${REPL_SNAP_PREFIX}${label}-${timestamp}"
     snap_name="${local_ds}@${snap_name_base}"

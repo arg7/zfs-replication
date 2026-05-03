@@ -159,8 +159,15 @@ assert_eq() {
 
 run_zep() {
     clean_tmp
-    local out rc
-    out=$("$ZEP_BIN" -bw "$@" </dev/null 2>&1)
+    local out rc extra=()
+    # Always run with --now for deterministic test behaviour (bypass time-interval check),
+    # except for --init (initial send) and non-replication modes.
+    case " $* " in
+        *" --init "*|*" --rotate"*|*" --status"*|*" --stats"*|*" --config"*)
+            ;;  # no --now needed
+        *) extra=(--now) ;;
+    esac
+    out=$("$ZEP_BIN" -bw "${extra[@]}" "$@" </dev/null 2>&1)
     rc=$?
     echo "$out"
     echo "$out" >> "/tmp/test${TEST_NUM:-00}.log"

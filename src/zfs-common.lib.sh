@@ -235,6 +235,23 @@ parse_time_to_seconds() {
     esac
 }
 
+parse_label_to_seconds() {
+    local lbl="$1"
+    if [[ "$lbl" =~ ^min([0-9]+)$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 60))
+    elif [[ "$lbl" =~ ^hour([0-9]+)$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 3600))
+    elif [[ "$lbl" =~ ^day([0-9]+)$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 86400))
+    elif [[ "$lbl" =~ ^month([0-9]+)$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 86400 * 30))
+    elif [[ "$lbl" =~ ^year([0-9]+)$ ]]; then
+        echo $((${BASH_REMATCH[1]} * 86400 * 365))
+    else
+        echo 3600
+    fi
+}
+
 format_minutes() {
     local mins="$1"
     [[ -z "$mins" || "$mins" == "-" ]] && { echo "-"; return; }
