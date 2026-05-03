@@ -10,12 +10,12 @@ ZEPLICATOR_CMD="$(readlink -f "$0")"
 LIB_DIR=$(dirname "$ZEPLICATOR_CMD")
 
 # Phase 1: Source library modules
-source "${LIB_DIR}/zfs-common.lib.sh"
-source "${LIB_DIR}/zfs-status.lib.sh"
-source "${LIB_DIR}/zfs-stats.lib.sh"
-source "${LIB_DIR}/zfs-alerts.lib.sh"
-source "${LIB_DIR}/zfs-retention.lib.sh"
-source "${LIB_DIR}/zfs-transfer.lib.sh"
+source "${LIB_DIR}/zep-common.lib.sh"
+source "${LIB_DIR}/zep-status.lib.sh"
+source "${LIB_DIR}/zep-stats.lib.sh"
+source "${LIB_DIR}/zep-alerts.lib.sh"
+source "${LIB_DIR}/zep-retention.lib.sh"
+source "${LIB_DIR}/zep-transfer.lib.sh"
 
 # Override library no-op with real alert dispatch
 _on_fatal_error() {

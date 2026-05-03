@@ -7,12 +7,12 @@ discovery and split-brain safety. It uses a "Compiled Standalone" model for
 deployment.
 
 ### File Structure
-- **`zfs-common.lib.sh`**: Shared utilities — property cache, logging, lock management, time parsing.
-- **`zfs-alerts.lib.sh`**: SMTP alerting with per-dataset rate-limiting.
-- **`zfs-retention.lib.sh`**: Snapshot rotation — shipped-aware purge, retention resolution.
-- **`zfs-transfer.lib.sh`**: Core replication engine — `zfs send`/`recv` pipeline, donor discovery, split-brain detection.
-- **`zfs-status.lib.sh`**: `--status` dashboard — chain health, pool stats, snapshot freshness.
-- **`zfs-stats.lib.sh`**: `--stats` wire protocol — called remotely via SSH for status aggregation.
+- **`zep-common.lib.sh`**: Shared utilities — property cache, logging, lock management, time parsing.
+- **`zep-alerts.lib.sh`**: SMTP alerting with per-dataset rate-limiting.
+- **`zep-retention.lib.sh`**: Snapshot rotation — shipped-aware purge, retention resolution.
+- **`zep-transfer.lib.sh`**: Core replication engine — `zfs send`/`recv` pipeline, donor discovery, split-brain detection.
+- **`zep-status.lib.sh`**: `--status` dashboard — chain health, pool stats, snapshot freshness.
+- **`zep-stats.lib.sh`**: `--stats` wire protocol — called remotely via SSH for status aggregation.
 - **`zeplicator`**: Main orchestrator — arg parsing, mode dispatch, promotion, cascade logic.
 - **`zpipe.c`**: C utility for byte-progress tracking in `zfs send | zfs recv` pipelines.
 - **`Makefile`**: Assembly script — strips shebangs and `source` lines, concatenates libraries and orchestrator into `build/zep`; compiles `zpipe.c`.
@@ -23,12 +23,12 @@ deployment.
 ### Assembly Order (function dependency)
 
 ```
-zfs-common.lib.sh     →  colors, cache, logging, locks, defaults
-zfs-stats.lib.sh      →  cmd_stats (uses common)
-zfs-status.lib.sh     →  cmd_status (uses stats + common)
-zfs-alerts.lib.sh     →  send_smtp_alert (uses common)
-zfs-retention.lib.sh  →  resolve_retention, purge_shipped_snapshots (uses common)
-zfs-transfer.lib.sh   →  send_snapshot, find_best_donor (uses common + alerts)
+zep-common.lib.sh     →  colors, cache, logging, locks, defaults
+zep-stats.lib.sh      →  cmd_stats (uses common)
+zep-status.lib.sh     →  cmd_status (uses stats + common)
+zep-alerts.lib.sh     →  send_smtp_alert (uses common)
+zep-retention.lib.sh  →  resolve_retention, purge_shipped_snapshots (uses common)
+zep-transfer.lib.sh   →  send_snapshot, find_best_donor (uses common + alerts)
 zeplicator            →  orchestrator (uses all libs)
 ```
 
@@ -56,7 +56,7 @@ zeplicator            →  orchestrator (uses all libs)
 - Stale locks are automatically cleared if the PID in the lockfile is no longer found in the process table (`kill -0 $PID`).
 
 ### 4. Label Interval Parsing
-- `parse_label_to_seconds()` in `zfs-common.lib.sh` translates label names to seconds:
+- `parse_label_to_seconds()` in `zep-common.lib.sh` translates label names to seconds:
   `min5`→300, `hour2`→7200, `day1`→86400.
 - Used by the interval gate to decide whether a snapshot is due.
 - `--now` bypasses the check; `--init` also bypasses (always sends).

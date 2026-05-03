@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zfs-common.lib.sh - Shared utility functions for Zeplicator
+# zep-common.lib.sh - Shared utility functions for Zeplicator
 
 # Exit codes for target verification
 EXIT_NO_DATASET=3

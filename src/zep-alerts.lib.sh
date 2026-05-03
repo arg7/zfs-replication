@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zfs-alerts.lib.sh - Notification functions for Zeplicator
+# zep-alerts.lib.sh - Notification functions for Zeplicator
 
 send_smtp_alert() {
     local level="warn"

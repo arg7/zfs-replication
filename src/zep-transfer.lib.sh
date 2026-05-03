@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zfs-transfer.lib.sh - Replication engine functions for Zeplicator
+# zep-transfer.lib.sh - Replication engine functions for Zeplicator
 
 zbud_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 zbud_timestamp_format="%Y-%m-%d-%H%M%S"

@@ -325,12 +325,12 @@ zep --fs tank/data --config user=repluser
 | File | Purpose |
 | :--- | :--- |
 | `zeplicator` | Orchestrator — arg parsing, mode dispatch, promotion, cascade logic. |
-| `zfs-common.lib.sh` | Property cache, logging, locks, node resolution, time parsing. |
-| `zfs-transfer.lib.sh` | Replication engine — `zfs send`/`recv` pipelines, donor discovery, split-brain. |
-| `zfs-retention.lib.sh` | Snapshot rotation — shipped-aware purge, retention resolution. |
-| `zfs-alerts.lib.sh` | SMTP alerting with per-dataset rate-limiting. |
-| `zfs-status.lib.sh` | `--status` dashboard — chain health, pool stats, snapshot freshness. |
-| `zfs-stats.lib.sh` | `--stats` wire protocol for remote status calls. |
+| `zep-common.lib.sh` | Property cache, logging, locks, node resolution, time parsing. |
+| `zep-transfer.lib.sh` | Replication engine — `zfs send`/`recv` pipelines, donor discovery, split-brain. |
+| `zep-retention.lib.sh` | Snapshot rotation — shipped-aware purge, retention resolution. |
+| `zep-alerts.lib.sh` | SMTP alerting with per-dataset rate-limiting. |
+| `zep-status.lib.sh` | `--status` dashboard — chain health, pool stats, snapshot freshness. |
+| `zep-stats.lib.sh` | `--stats` wire protocol for remote status calls. |
 | `zpipe.c` | C pipe monitor for byte-progress tracking in send/recv pipelines. |
 | `Makefile` | Assembles libraries into `build/zep` and compiles `zpipe`. |
 

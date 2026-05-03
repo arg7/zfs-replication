@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# zfs-retention.lib.sh - Snapshot rotation and retention functions for Zeplicator
+# zep-retention.lib.sh - Snapshot rotation and retention functions for Zeplicator
 
 # Resolve retention (keep count) for the current node
 resolve_retention() {

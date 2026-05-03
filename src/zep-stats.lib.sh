@@ -1,4 +1,4 @@
-# zfs-stats.lib.sh - Gather node state stats (called via `zep --stats`)
+# zep-stats.lib.sh - Gather node state stats (called via `zep --stats`)
 # Output format: ZPOOL:, IOSTAT:, FILESYSTEM|, TRANSFER|
 
 cmd_stats() {
