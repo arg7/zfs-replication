@@ -1217,31 +1217,16 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         else
             die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
-    else
-        case $ZBUD_STATUS in
-            1) send_smtp_alert "warning" --task "replication" --status "no common snapshots" "WARNING: No common snapshots for $local_ds to $remote_ds." ;;
-            6) send_smtp_alert "warning" --task "replication" --status "resume failed" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared." ;;
-        esac
-        # DISABLED: Searching chain for a better donor
-        # TODO: re-enable donor discovery when ready
-        # If the destination currently has a split brain error, local replication likely failed due to
-        # missing common snapshots. Donor discovery will also fail for the same reason. Skip it.
-        : '
-        remote_sb=$(ssh "$HOP_TARGET" "zfs get -H -o value zep:error:split-brain $remote_ds" 2>/dev/null)
-        if [[ "$remote_sb" == "true" ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Skipping donor search because local dataset is in a split-brain state."
-            DONOR_NODE=""
-            SKIP_DONOR_SEARCH=true
-        else
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Local replication to $hop_node failed. Searching chain for a better donor..."
-            SKIP_DONOR_SEARCH=false
+    elif [[ $ZBUD_STATUS -eq 1 ]]; then
+        send_smtp_alert "warning" --task "replication" --status "no common snapshots" "WARNING: No common snapshots for $local_ds to $remote_ds."
 
-            if [[ "$IS_DONOR" == true ]]; then
-                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
-                DONOR_NODE=""
-            else
-                DONOR_NODE=$(find_best_donor "$hop_node" "$raw_filesystem")
-            fi
+        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} No common snapshots with $hop_node. Searching chain for a donor..."
+
+        DONOR_NODE=""
+        if [[ "$IS_DONOR" == true ]]; then
+            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
+        else
+            DONOR_NODE=$(find_best_donor "$hop_node" "$raw_filesystem")
         fi
 
         if [[ -n "$DONOR_NODE" ]]; then
@@ -1255,7 +1240,9 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ "$ZEP_BW" == "true" ]]; then donor_opts+=" -bw"; fi
             if [[ "$ZEP_COLORS_ENABLED" == "true" && "$ZEP_BW" != "true" ]]; then donor_opts+=" --force-color"; fi
 
-            if ssh "$donor_target" "zep $raw_filesystem $label $keep_fallback $donor_opts"; then
+            DONOR_PROPS_ARG="--sync-props ${sync_props_data:-$(get_repl_props_encoded "$local_ds")}"
+
+            if ssh "$donor_target" "zep $raw_filesystem $label $keep_fallback $donor_opts $DONOR_PROPS_ARG"; then
                 echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Delegated replication from $DONOR_NODE to $hop_node successful."
 
                 # RETRY local replication now that common ground should exist
@@ -1270,11 +1257,10 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Delegated replication from $DONOR_NODE failed."
             fi
         else
-            if [[ "$SKIP_DONOR_SEARCH" != true ]]; then
-                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
-            fi
+            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
         fi
-        '
+    else
+        [[ $ZBUD_STATUS -eq 6 ]] && send_smtp_alert "warning" --task "replication" --status "resume failed" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared."
     fi
 
     if [[ "$TRANSFER_DONE" == false && "$REPL_POLICY" == "fail" ]]; then

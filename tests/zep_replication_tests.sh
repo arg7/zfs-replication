@@ -79,9 +79,10 @@ _test_table() {
 14|NON-MASTER SKIP|test_non_master
 15|STATUS|test_status
 16|ROTATE|test_rotate
-17|FOREIGN DATASET|test_foreign_dataset
-18|MISSING PERMISSIONS|test_missing_perms
-19|MISSING POOL|test_missing_pool
+17|LOST COMMON / DONOR RECOVERY|test_lost_common_donor
+18|FOREIGN DATASET|test_foreign_dataset
+19|MISSING PERMISSIONS|test_missing_perms
+20|MISSING POOL|test_missing_pool
 TABLE
 }
 
@@ -221,10 +222,9 @@ _pre_test_cleanup() {
     # Re-ensure pool-level permissions survive dataset destruction
     zfs allow zep-user-2 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-2 2>/dev/null || true
     zfs allow zep-user-3 create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff zep-node-3 2>/dev/null || true
-    # Restore all hosts to 127.0.0.1 (undo any prior isolation)
+    # Restore FQDNs and hosts for all nodes (undo any prior isolation)
     for i in 1 2 3; do
-        sed -i "/zep-node-${i}/d" /etc/hosts
-        echo "127.0.0.1 zep-node-${i}.local" >> /etc/hosts
+        zfs set "zep:node:node${i}:fqdn=zep-node-${i}.local" "$DS" 2>/dev/null || true
     done
     "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=fail chain=node1,node2,node3 zep:zfs:recv_opt=- zep:debug:send_maxbytes=- zep:debug:throttle=- zep:debug:send_timeout=0 </dev/null > /dev/null 2>&1
 }
@@ -286,14 +286,14 @@ teardown_resume_mode() {
 
 isolate_node() {
     local node="$1"
-    sed -i "/zep-node-${node}/d" /etc/hosts
-    echo "192.0.2.1 zep-node-${node}.local" >> /etc/hosts
+    local ds="zep-node-1/test-1"
+    zfs set "zep:node:node${node}:fqdn=zep-node-${node}.local.disabled" "$ds"
 }
 
 restore_node() {
     local node="$1"
-    sed -i "/zep-node-${node}/d" /etc/hosts
-    echo "127.0.0.1 zep-node-${node}.local" >> /etc/hosts
+    local ds="zep-node-1/test-1"
+    zfs set "zep:node:node${node}:fqdn=zep-node-${node}.local" "$ds"
 }
 
 _get_chain() {
@@ -773,6 +773,55 @@ test_rotate() {
 
     # Cleanup: restore retention to default 10
     zfs set "zep:role:master:keep:${LABEL}=10" "$DS"
+}
+
+test_lost_common_donor() {
+    # Scenario: node2 goes offline, master replicates to node3 with aggressive
+    # rotation (keep=2). When node2 returns, master has lost common ground.
+    # Donor search must find node3 to heal node2, then retry local replication.
+
+    run_zep "$DS" --alias node1 "$LABEL" --init > /dev/null
+
+    # Disable cron rotation on all nodes (interferes with controlled rotation)
+    local cron_saved=$(crontab -l 2>/dev/null)
+    crontab -l 2>/dev/null | sed 's/^\(.*--rotate.*\)/#\1/' | crontab -
+    trap '[[ -n "$cron_saved" ]] && echo "$cron_saved" | crontab -' RETURN
+
+    # Set aggressive retention on master (keep=2) so rotation prunes old snaps
+    zfs set "zep:role:master:keep:${LABEL}=2" "$DS"
+
+    # Enable resilience so master skips offline node2 and goes to node3
+    "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=resilience </dev/null > /dev/null
+
+    # Isolate node2
+    isolate_node 2
+
+    # Run many cycles: master creates snaps, ships to node3, rotates old shipped
+    # Node2 never receives them — its last common snapshot with master gets purged
+    for cycle in $(seq 1 8); do
+        run_zep "$DS" --alias node1 "$LABEL" > /dev/null
+        run_zep "$DS" --alias node1 --rotate > /dev/null
+    done
+
+    # Restore node2
+    restore_node 2
+    sleep 1
+
+    # Master tries to replicate to node2 → no common ground → donor search
+    # Should find node3 as donor → node3 heals node2 → master retries → cascade
+    out=$(run_zep "$DS" --alias node1 "$LABEL"); rc=$?
+    assert_exit "donor recovery exit 0"  "0" "$rc"
+    assert_out  "donor found"           "$out" "Found donor peer"
+    assert_out  "retry successful"      "$out" "Local replication retry successful"
+    assert_out  "cascade ok"            "$out" "VERIFICATION SUCCESS"
+
+    # Verify node2 caught up to all snapshots
+    local node2_snaps=$(_ssh_node 2 "zfs list -t snap -H -o name -r zep-node-2/test-2 2>/dev/null | grep -c ${LABEL}" || true)
+    assert_ge "node2 caught up" "$node2_snaps" 9
+
+    # Reset retention and policy for subsequent tests
+    zfs set "zep:role:master:keep:${LABEL}=10" "$DS"
+    "$ZEP_BIN" -bw "$DS" --alias node1 --config policy=fail </dev/null > /dev/null
 }
 
 test_foreign_dataset() {
