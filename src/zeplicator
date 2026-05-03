@@ -1250,6 +1250,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                 if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
                     echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Local replication retry successful."
                     TRANSFER_DONE=true
+                    send_smtp_alert "info" --detail --task "replication" --status "node recovered" "SUCCESS: Node $hop_node ($HOP_TARGET) recovered via donor $DONOR_NODE. Chain re-established."
                 else
                     echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Local replication retry failed after donor healing."
                 fi
