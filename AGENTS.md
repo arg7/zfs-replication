@@ -149,8 +149,8 @@ Tests 1-10 are deterministic unit tests. Tests 11-13 exercise resilience and rec
 | 2 | `INCREMENTAL` | Writes data, runs incremental replication with explicit label | exit 0 |
 | 3 | `DIVERGENCE` | GUID mismatch + data divergence tests on node3 | exit !0 |
 | 4 | `DIVERGENCE_OVERRIDE` | Force override with `-F` recv flag | exit 0 |
-| 5 | `RESUME` | Throttled transfer interrupted, retried up to 30x | exit 0 |
-| 6 | `RESUME_FAILED` | Destroys mid-transmit snaps, verifies token cleared | exit 0 |
+| 5 | `RESUME` | `zpipe --cut` interrupts send at 1MB; retries resume up to 30x | exit 0 |
+| 6 | `RESUME_FAILED` | `zpipe --cut` interrupts multi-snap send; destroys mid-transmit snaps; verifies token cleared | exit 0 |
 | 7 | `RESILIENCE NODE2 OFFLINE` | `policy=resilience`, isolates node2, verifies node3 still receives | exit 3 |
 | 8 | `RESILIENCE NODE2 RECOVERY` | Restores node2, full replication succeeds | exit 0 |
 | 9 | `SPLIT-BRAIN RESILIENCE` | Split-brain with resilience policy — skipped, chain continues | exit 3 |
