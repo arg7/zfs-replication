@@ -260,6 +260,55 @@ Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 | `/tmp/<prefix>_<alias>-<ds>-replication.hint` | Split-brain recovery hints displayed to the operator. |
 | `/tmp/<prefix>_<alias>-<ds>-repl-alerts/` | Per-dataset rate-limit state for SMTP alerts. |
 
+## Hardening — Minimal ZFS Permissions
+
+Running replication as a non-root user requires delegated ZFS permissions. The
+following two-tier delegation gives `zep` exactly what it needs and nothing more:
+
+**Pool-level** (survives dataset destruction, tied to the pool):
+
+```bash
+zfs allow repluser create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff tank
+```
+
+| Permission | Why needed |
+| :--- | :--- |
+| `create` | `zfs recv` creates target datasets on first receive. |
+| `mount` | Received datasets must be mounted after create. |
+| `receive` | Core receive side of `zfs send \| zfs recv`. |
+| `destroy` | Rotation purges old snapshots; init tears down stale datasets. |
+| `send` | Source side of send/recv pipeline. |
+| `snapshot` | `zep` creates timestamped snapshots on the master. |
+| `hold` | Holds prevent rotation from deleting in-flight snapshots. |
+| `release` | Releases hold after transfer completes. |
+| `userprop` | Read/write `zep:*` properties. |
+| `diff` | Donor discovery and divergence reports use `zfs diff`. |
+
+**Dataset-level** (must be re-delegated after `zfs destroy` / `zfs recv`):
+
+```bash
+zfs allow repluser create,destroy,send,receive,snapshot,hold,release,userprop tank/data
+```
+
+This mirrors the pool-level set but excludes `mount` (handled at pool level).
+The replication user also needs **no** `sudo` access — all operations are
+performed through the delegated ZFS permissions.
+
+### SSH Hardening
+
+```bash
+# In ~/.ssh/authorized_keys on each node:
+command="/usr/local/bin/zep",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-rsa AAAA...
+```
+
+This restricts the replication user's key to only running `zep` — no shell, no
+port forwarding, no PTY. Combine with `zep:user` to use a non-root account across
+the chain:
+
+```bash
+zep --fs tank/data --config user=repluser
+```
+
 ## Exit Codes
 
 | Code | Meaning |
