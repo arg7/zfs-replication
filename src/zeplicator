@@ -60,6 +60,8 @@ Primary Flags:
   --init            Perform an initial replication (uses full stream, mbuffer/zstd).
   --now             Force snapshot creation for all labels immediately, bypassing
                     the per-label time-interval check.
+  --cron            Cron-friendly mode: master replicates + rotates; non-master
+                    only rotates (no error on non-master, exit 0).
   --suspend/resume  Suspend or resume replication across the entire chain.
   --config          Enter configuration mode to view/set/clear 'zep:' ZFS properties.
   --status          Probe and display system status for the replication chain.
@@ -108,6 +110,7 @@ SUSPEND=false
 RESUME=false
 AUTO=false
 DRY_RUN=false
+CRON_MODE=false
 ALIGN_CHAIN_DATA=false
 YES=false
 PROMOTE_SNAP=""
@@ -152,6 +155,7 @@ while [[ $# -gt 0 ]]; do
         --label) LABEL_FILTER+=("$2"); label="${LABEL_FILTER[0]}"; LABEL_EXPLICIT=true; shift 2 ;;
         --fs) raw_filesystem="$2"; shift 2 ;;
         --keep) keep_fallback="$2"; shift 2 ;;
+        --cron) CRON_MODE=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         --snap-list) shift 2 ;;  # deprecated, kept for backward compat
         --status) STATUS_MODE=true; shift ;;
@@ -924,6 +928,24 @@ CLI_ALIAS="$ME" # Update global CLI_ALIAS with resolved value for lock file
 NEXT_HOP=""
 IS_MASTER=false
 ME_INDEX=-1
+
+run_cron_rotate() {
+    local _prefix _keep _lbl
+    _prefix=$(get_snap_prefix "$filesystem")
+    declare -A _seen
+    while read -r _snap; do
+        [[ -z "$_snap" ]] && continue
+        _lbl="${_snap#${_prefix}}"
+        _lbl="${_lbl%%-*}"
+        [[ -z "$_lbl" ]] && continue
+        _seen["$_lbl"]=1
+    done < <(zfs list -t snapshot -H -o name -r "$local_ds" 2>/dev/null | grep "@${_prefix}" | cut -d'@' -f2)
+    for _lbl in "${!_seen[@]}"; do
+        _keep=$(resolve_retention "$local_ds" "$_lbl" "$keep_fallback")
+        purge_shipped_snapshots "$local_ds" "$_lbl" "$_keep"
+    done
+}
+
 RESOLVED_KEEP=$keep_fallback
 
 if [[ -n "$REPL_CHAIN" ]]; then
@@ -1109,6 +1131,11 @@ fi
 # --- END HEARTBEAT MONITORING ---
 
 if [[ "$IS_MASTER" == false && "$CASCADED" == false && "$PROMOTE" == false && "$MARK_ONLY" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
+    if [[ "$CRON_MODE" == true ]]; then
+        echo "${CHAIN_PREFIX}  🔄 Node $ME is not Master. Running rotation only..."
+        run_cron_rotate
+        exit 0
+    fi
     echo "${CHAIN_PREFIX}  🛡️  Node $ME is not Master."
     exit 1
 fi
@@ -1487,6 +1514,11 @@ fi
 done
 
 exit_code=$_worst_exit
+
+# Cron mode: run rotation after replication on master
+if [[ "$CRON_MODE" == true && "$IS_MASTER" == true ]]; then
+    run_cron_rotate
+fi
 
 dry_done=""
 [[ "$DRY_RUN" == true ]] && dry_done=" [DRY RUN]"
