@@ -1,42 +1,51 @@
-# Zeplicator: Another ZFS Replication Manager
+# Zeplicator
 
-A robust, cascading ZFS replication script designed for multi-node chains. It handles snapshot creation, incremental transfers with resume support, and graduated retention across the entire chain.
+A ZFS replication manager for multi-node chains. Each node runs `zep` from cron;
+the current master creates timestamped snapshots for each configured label, sends them
+incrementally down the chain with `mbuffer`+`zstd` compression, and cascades to the
+next hop automatically. Non-master nodes silently rotate old snapshots until they
+become master.
 
-## Heartbeat Monitoring
+## Features
 
-Zep can monitor the freshness of upstream replication chains on middle and sink nodes. 
-
-If a dataset has the `zep:alert:heartbeat:<label>` property set (e.g., `zep:alert:heartbeat:frequently=1h`), the node will monitor the age of the latest snapshot with the matching label. If the latest snapshot is older than the configured threshold, Zep will trigger a `critical` alert via SMTP.
-
-Thresholds support time suffixes: `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `M` (months), and `Y` (years).
-
-Example:
-```bash
-# Alert if upstream hasn't sent a 'frequently' snapshot in over 1 hour
-zfs set zep:alert:heartbeat:frequently=1h pool/data
-```
-
-
-- **Split-Brain Protection**: Automatically performs a `zfs diff` between the common base and the local dataset on the sink. Replication **aborts** with a critical alert if any local data changes are detected, preventing silent data loss.
-- **Intelligent Donor Discovery**: Downstream nodes can automatically discover and "pull" from any other node in the chain (not just their immediate parent) to find the best common snapshot, ensuring resilience even if multiple nodes are out of sync.
-- **GUID-based Consistency**: Uses internal ZFS GUIDs instead of snapshot names for all intersection checks, making the system immune to snapshot renaming or formatting differences.
-- **Visual Progress & Icons**: Rich CLI output with status icons (✅, ❌, 🔗) and a final success/partial-success summary for complex operations like promotion.
-- **Cascading Replication**: Automatically triggers replication on the next hop in the chain once the local transfer is verified.
-- **End-to-End Verification**: Confirms the arrival of the specific snapshot at the final sink before marking local snapshots as "shipped".
-- **Automatic Configuration Sync**: All `zep:*` properties (retention, SMTP, chain order) are automatically propagated from the master to all downstream nodes during replication.
-- **Safe Master Promotion**: Promote any node to Master using the `--promote` flag. Support for automatic chain-wide consistency checks and rollbacks.
-- **Pause & Resume**: Use `--suspend` and `--resume` to globally pause Master operations.
-- **Cron Safety**: The script can be configured in cron on **all nodes**. Only the current Master will initiate replication.
-- **Robust Transfers**: Uses `zfsbud` logic with `mbuffer` and `zstd` compression for reliable and fast ZFS send/receive.
-- **Graduated Retention**: Different retention policies (keep counts) for each node in the chain.
-- **Skip-Hop Resiliency**: If a downstream node is offline, the script automatically skips it and attempts to replicate to the next node in the chain.
-- **SMTP Alerts**: Sends email notifications for critical failures, initial sync success, role changes, and suspend/resume actions.
-- **Dry-Run Simulation**: Full-chain "what-if" mode using `--dry-run`. It simulates snapshot creation, transfers, and rotation across all nodes using virtual snapshot propagation.
-- **Modular Architecture**: Clean separation of concerns with specialized libraries for common utilities, alerts, retention, and transfers.
+- **Multi-label replication** — replicate several snapshot labels (`min1`, `hour1`,
+  `day1`, …) in one invocation. Each label has its own interval that must elapse
+  before a new snapshot is created (unless `--now` is used).
+- **Cascading chain** — downstream nodes cascade replication to the next hop
+  immediately after a successful local receive. The master waits for the cascade to
+  reach the sink before marking the snapshot as shipped.
+- **Time-interval gating** — labels encode their interval in the name (`min5` → 300s,
+  `hour2` → 7200s, `day1` → 86400s, etc.). Cron calls `zep` every minute and only
+  creates snapshots whose interval has elapsed.
+- **GUID-based consistency** — all common-snapshot discovery uses ZFS GUIDs, making
+  the system immune to snapshot renames or clock drift between nodes.
+- **Split-brain detection** — if the destination has been modified locally, the
+  pipeline aborts before overwriting data. A critical SMTP alert fires and the
+  `zep:error:split-brain` property is set.
+- **Donor discovery** — when a downstream node's common ground is lost, the next
+  upstream node searches the entire chain for a suitable donor to re-establish the
+  replication path.
+- **Resilience mode** — with `zep:policy=resilience`, unreachable or split-brain
+  nodes are skipped and the chain continues. Exit code 3 signals partial success.
+- **Graduated retention** — per-role retention counts (`master`, `middle`, `sink`)
+  with shipped-aware purge: snapshots already propagated to downstream nodes are
+  pruned first.
+- **Chain promotion** — any node can be promoted to master with automatic common-
+  snapshot consensus and property propagation across the chain.
+- **Config sync** — all `zep:*` properties are automatically propagated from the
+  master to every downstream node during replication.
+- **SMTP alerts** — critical (split-brain, heartbeat lost), warning (unreachable
+  node, resume failure), and info (init success, promotion, donor recovery) alerts
+  with per-dataset rate-limiting.
+- **Dry-run mode** — simulate the full chain without touching ZFS or sending data.
+- **Status dashboard** — `--status` shows chain health, pool capacity, IO stats,
+  snapshot ages vs heartbeat thresholds, and retention percentages.
+- **Self-contained binary** — `make` assembles libraries, the orchestrator, and the
+  `iomon` C binary into a single `build/zep` script.
 
 ## Dependencies
 
-The following packages must be installed on all nodes:
+All nodes need:
 
 - `zfsutils-linux`
 - `openssh-server` / `openssh-client`
@@ -44,186 +53,235 @@ The following packages must be installed on all nodes:
 - `zstd`
 - `curl` (for SMTP alerts)
 
-## Installation & Setup
+## Installation
 
-1. **Clone & Build**:
-   ```bash
-   git clone https://github.com/arg7/zfs-replication.git
-   cd zfs-replication
-   make
-   sudo make install
-   ```
+```bash
+git clone https://github.com/arg7/zeplicator.git
+cd zeplicator
+make
+sudo make install         # installs to /usr/local/bin
+```
 
-2. **SSH Connectivity**:
-   Ensure **Full Mesh** SSH connectivity between all nodes. Use `ssh-keyscan` and distribute public keys to all `authorized_keys`.
+Build artifacts are in `build/`:
+- `zep` — assembled standalone script
+- `iomon` — compiled C pipe monitor
+- `alertcon` — debug SMTP server (development only)
 
-3. **ZFS Properties**:
-   Configure the Master node's dataset. All properties prefixed with `zep:` are automatically synced across the chain.
+## Quick Start
 
-## Configuration Properties (`zep:*`)
+### 1. Configure the master
+
+```bash
+zep --fs tank/data --config \
+  chain=node1,node2,node3          \
+  node:node1:fs=tank/data           \
+  node:node1:fqdn=10.0.0.1          \
+  node:node2:fs=tank/data           \
+  node:node2:fqdn=10.0.0.2          \
+  node:node3:fs=tank/data           \
+  node:node3:fqdn=10.0.0.3          \
+  user=repluser                     \
+  role:master:keep:min1=10          \
+  role:master:keep:hour1=6           \
+  role:middle:keep:min1=30          \
+  role:middle:keep:hour1=12          \
+  role:sink:keep:min1=90            \
+  role:sink:keep:hour1=24            \
+  smtp:host=smtp.example.com        \
+  smtp:port=587                      \
+  smtp:from=zep@example.com          \
+  smtp:to=admin@example.com          \
+  smtp:user=zep@example.com          \
+  smtp:password=xxx
+```
+
+Properties are synced to downstream nodes automatically during the first replication.
+
+### 2. Set up SSH
+
+Full-mesh passwordless SSH between all nodes for the replication user:
+
+```bash
+ssh-keyscan node1.local node2.local node3.local >> ~/.ssh/known_hosts
+# distribute each node's public key to every other node's authorized_keys
+```
+
+### 3. Initial replication
+
+```bash
+zep --fs tank/data --init
+```
+
+### 4. Add to cron (every node)
+
+```bash
+* * * * * /usr/local/bin/zep --cron
+```
+
+Master replicates (interval-gated) and rotates; non-masters rotate silently.
+
+## Usage
+
+```
+zep --fs <dataset> [--label <name>] [--keep <n>] [flags]
+zep                                              # auto-discover all master datasets
+```
+
+### Arguments
+
+| Flag | Description |
+| :--- | :--- |
+| `--fs <dataset>` | ZFS filesystem to operate on. Omit to auto-discover all local datasets where this node is master. |
+| `--label <name>` | Snapshot label to replicate (repeatable). Omit to use all labels with a `zep:role:*:keep:` policy. |
+| `--keep <n>` | Fallback retention count if no role/node policy is set (default: 10). |
+
+### Primary Flags
+
+| Flag | Description |
+| :--- | :--- |
+| `--init` | Initial replication — full stream, creates destination datasets. |
+| `--cron` | Cron mode: master replicates (interval-gated) + rotates; non-master rotates only, exits 0. |
+| `--now` | Force immediate snapshot creation for all labels, bypassing interval checks. |
+| `--dry-run` | Simulate the entire chain without creating snapshots or transferring data. |
+| `--status` | Chain health dashboard with pool capacity, IO stats, and snapshot freshness. |
+| `--config` | Configuration mode — see below. |
+| `--promote` | Promote this node to master. Requires `--auto`, `--snap <name>`, or `--align-chain-data`. |
+| `--suspend` / `--resume` | Pause or resume master replication chain-wide. |
+| `--alias <name>` | Override local node alias (when hostname detection fails). |
+| `--stats` | Internal wire protocol for `--status`. |
+| `-y` | Assume yes for destructive operations. |
+
+### Advanced Flags
+
+| Flag | Description |
+| :--- | :--- |
+| `--rotate` | Run retention purge for all labels locally (standalone, no replication). |
+| `--mark-only` | Only purge shipped snapshots, no replication. |
+| `--target <node>` | Point-to-point transfer to a specific node (bypasses chain). |
+| `--donor` | Run as a donor peer for downstream healing (internal). |
+| `--apply-props <b>` | Apply encoded properties and exit (internal). |
+| `--divergence-report <snap>` | Check remote dataset for split-brain (internal). |
+
+### Configuration Mode (`--config`)
+
+```bash
+# View all zep:* properties
+zep --fs tank/data --config
+
+# Set properties (shorthands expand automatically)
+zep --fs tank/data --config chain=node1,node2,node3 smtp:host=mail.example.com
+
+# Clear a property
+zep --fs tank/data --config --clear smtp:port
+
+# Export / import
+zep --fs tank/data --config --export /tmp/zep.conf
+zep --fs tank/data --config --import /tmp/zep.conf
+```
+
+Shorthand prefixes:
+- `smtp:host` → `zep:smtp_host`
+- `node:n1:fqdn` → `zep:node:n1:fqdn`
+- `role:sink:keep:min1` → `zep:role:sink:keep:min1`
+
+## Configuration Properties
+
+All properties are ZFS user properties on the dataset prefixed with `zep:`.
+
+### Chain & Identity
 
 | Property | Description | Example |
 | :--- | :--- | :--- |
-| `zep:chain` | **(Required)** Comma-separated list of host aliases. | `node1,node2,node3` |
-| `zep:node:<alias>:fs` | Physical dataset path for a specific host alias. | `zep:node:node1:fs=tank/data` |
-| `zep:node:<alias>:fqdn` | Real address/FQDN for a host alias. | `zep:node:node1:fqdn=10.0.0.5` |
-| `zep:node:<alias>:user` | SSH user for a host alias. | `zep:node:node1:user=repluser` |
-| `zep:node:<alias>:keep:<label>` | Host-specific retention. | `zep:node:node1:keep:min1=30` |
-| `zep:role:<role>:keep:<label>` | Role-based retention (`master`, `middle`, `sink`). | `zep:role:sink:keep:min1=90` |
-| `zep:user` | **(Global)** Fallback SSH user. | `root` |
-| `zep:snap_prefix` | Prefix for snapshots. | `zep_` |
-| `zep:zfs:send_opt` | Extra flags passed to `zfs send` (e.g. `-w`, `-R`). Default: none. | `-w` |
-| `zep:zfs:recv_opt` | Extra flags passed to `zfs recv` (e.g. `-s`, `-F`). Default: `-F`. | `-s` |
-| `zep:policy` | Replication policy: `fail` (abort on any error) or `resilience` (skip unreachable/split-brain nodes and continue chain). Default: `fail`. | `resilience` |
-| `zep:ssh:timeout` | SSH connection timeout in seconds. Default: `10`. | `30` |
-| `zep:proc:timeout` | Total process/transfer timeout in seconds. Default: `3600`. | `7200` |
-| `zep:throttle` | Bandwidth limit for `mbuffer` (e.g., `100M`, `1G`). Uses `-R`. | `50M` |
-| `zep:mbuffer_size` | Size of `mbuffer` in-memory buffer. Default: `64M`. | `256M` |
-| `zep:alert:critical:threshold` | Rate limit for critical alerts (Default: 0s). | `0s` |
-| `zep:alert:warn:threshold` | Rate limit for warning alerts (Default: 1h). | `1h` |
-| `zep:alert:info:threshold` | Rate limit for info alerts (Default: 24h). | `24h` |
-| `zep:alert:heartbeat:<label>` | Heartbeat freshness threshold for upstream nodes. | `1h` |
+| `zep:chain` | Comma-separated chain order. | `node1,node2,node3` |
+| `zep:node:<alias>:fs` | Dataset path on that node. | `tank/data` |
+| `zep:node:<alias>:fqdn` | FQDN or IP for SSH. | `10.0.0.5` |
+| `zep:node:<alias>:user` | SSH user (per-node override). | `repluser` |
+| `zep:user` | Global fallback SSH user. | `root` |
+| `zep:snap_prefix` | Snapshot name prefix (default: `zep_`). | `zep_` |
 
-### Configuration Management (`--config`)
+### Retention
 
-Zep provides a built-in configuration engine to manage `zep:*` ZFS properties without needing to call `zfs set` manually. It supports shorthand prefixes for common settings.
-
-#### Available Subcommands:
-
-| Subcommand | Description |
+| Property | Example |
 | :--- | :--- |
-| `--list` | (Default) Lists all `zep:` properties currently set on the dataset. |
-| `key=value` | Sets a property. Supports shorthands like `smtp:host=...` or `node:n1:fqdn=...`. |
-| `--clear <key>` | Inherits/removes a specific property from the dataset. |
-| `--export <file>`| Saves all `zep:` properties to a plain-text file. |
-| `--import <file>`| Loads and sets properties from a file. Supports comments and shorthands. |
+| `zep:role:master:keep:<label>` | `zep:role:master:keep:min1=10` |
+| `zep:role:middle:keep:<label>` | `zep:role:middle:keep:hour1=12` |
+| `zep:role:sink:keep:<label>` | `zep:role:sink:keep:min1=90` |
+| `zep:node:<alias>:keep:<label>` | Per-node override. |
 
-#### Usage Examples:
+Labels encode their interval in the name: `min5`=5m, `hour2`=2h, `day1`=1d.
 
-**1. Viewing Configuration**
-```bash
-zep pool/mydata --config  # or --config --list
-```
+### Transfer
 
-**2. Setting Properties (with Shorthands)**
-Shorthands automatically expand to their full ZFS property names:
-- `smtp:host=mail.com` $\rightarrow$ `zep:smtp_host=mail.com`
-- `node:n1:fqdn=10.0.0.1` $\rightarrow$ `zep:node:n1:fqdn=10.0.0.1`
-- `role:sink:keep:min1=90` $\rightarrow$ `zep:role:sink:keep:min1=90`
+| Property | Default | Description |
+| :--- | :--- | :--- |
+| `zep:zfs:send_opt` | *(none)* | Extra `zfs send` flags (e.g. `-w`, `-L`). |
+| `zep:zfs:recv_opt` | `-F` | Extra `zfs recv` flags. |
+| `zep:throttle` | *(none)* | Bandwidth limit for `mbuffer` (e.g. `100M`). |
+| `zep:mbuffer_size` | `64M` | `mbuffer` in-memory buffer. |
+| `zep:ssh:timeout` | `10` | SSH connect timeout (seconds). |
+| `zep:proc:timeout` | `3600` | Total transfer timeout (seconds). |
 
-```bash
-zep pool/mydata --config smtp:host=smtp.gmail.com smtp:port=587 node:node1:user=repl
-```
+### Policy
 
-**3. Clearing a Property**
-```bash
-zep pool/mydata --config --clear smtp:port
-```
+| Property | Default | Description |
+| :--- | :--- | :--- |
+| `zep:policy` | `fail` | `fail` (abort on error) or `resilience` (skip failed nodes). |
+| `zep:suspend` | `false` | Set to `true` to pause master replication chain-wide. |
+| `zep:error:split-brain` | *(unset)* | Set to `true` when split-brain is detected. |
 
-**4. Batch Import/Export**
-```bash
-# Export settings from one dataset
-zep pool/old-data --config --export /tmp/repl.conf
+### Alerting
 
-# Import to another dataset
-zep pool/new-data --config --import /tmp/repl.conf
-```
-
-### Usage
-
-### System Status (`--status`)
-The `--status` command provides a comprehensive, color-coded overview of the health of the entire replication chain. It aggregates status hierarchically from individual snapshots up to the node level.
-
-```bash
-zep pool/mydata --status
-```
-
-Features:
-- **Node Connectivity**: Each node shows its FQDN and ping latency from the current host (e.g., `node1 (host.local, ping: 2ms)`). The local node shows `ping: local`.
-- **Hierarchical Health Aggregation**: The health state (Green/Yellow/Red) bubbles up from snapshots $\rightarrow$ datasets $\rightarrow$ zpools $\rightarrow$ nodes. If any snapshot is critical, the entire dataset, its pool, and the node will be marked red.
-- **Visual Icons**: Uses simple indicators: `●` for nodes, `💾` for pools, and `📁` for datasets.
-- **Zpool Capacity Monitoring**: Automatically flags zpools as Warning (yellow) if usage $\ge$ 40% and Critical (red) if $\ge$ 80% or if the pool is offline. Free space percentage is displayed inline.
-- **IO Bandwidth Monitor**: Real-time IO statistics per zpool from `zpool iostat` (ops/sec and bandwidth), indented to align with the pool name.
-- **Retention Tracking**: Snapshot count shown per label (e.g., `min1(15)`) with a color-coded retained percentage warning when below 100% (e.g., `[retained 35%]`). Color thresholds: <30% = red, <60% = yellow.
-- **Smart Heartbeat Parsing**: Snapshot freshness is validated against the `zep:alert:heartbeat:<label>` property. If unconfigured, the script intelligently parses time values directly from the label (e.g., `min15`, `hour2`, `day1`).
-- **Unconfigured Detection**: Highlights snapshots that exist but have no retention policy configured (`[unconfigured]`).
-- **Automation Ready**: Returns precise shell exit codes for monitoring integrations (see [Exit Codes](#exit-codes)).
-
-### Basic Replication
-```bash
-zep pool/mydata min1 10
-```
-
-### Explicit Identity Override
-If auto-discovery fails (hostname doesn't match and IP isn't in DNS/config), you can force the node's alias:
-```bash
-zep pool/mydata min1 10 --alias node2
-```
-
-### Initial Replication
-For the first run (no common snapshots downstream). Sends a success email upon completion.
-```bash
-zep pool/mydata --init
-```
-
-### Master Promotion & Recovery
-1. **Auto-Discovery (Recommended)**:
-   ```bash
-   zep pool/mydata --promote --auto [-y]
-   ```
-2. **Brutal Startover (Dangerous)**:
-   ```bash
-   zep pool/mydata --promote --destroy-chain
-   ```
-
-### Pause & Resume
-```bash
-zep pool/mydata --suspend
-zep pool/mydata --resume
-```
-
-### Dry-Run & Simulation
-Simulate the entire replication chain, including virtual snapshot creation and rotation previews, without making any changes:
-```bash
-zep pool/mydata min1 10 --dry-run
-```
-
-### Help & Flags
-For a full list of all available flags and configuration options:
-```bash
-zep --help
-```
+| Property | Default | Description |
+| :--- | :--- | :--- |
+| `zep:smtp_host` | — | SMTP server hostname. |
+| `zep:smtp_port` | `465` | SMTP port. |
+| `zep:smtp_protocol` | `smtps` | `smtp` or `smtps`. |
+| `zep:smtp_user` | — | SMTP auth user. |
+| `zep:smtp_password` | — | SMTP auth password. |
+| `zep:smtp_from` | — | Envelope sender. |
+| `zep:smtp_to` | — | Alert recipient. |
+| `zep:alert:critical:threshold` | `0s` | Rate-limit for critical alerts. |
+| `zep:alert:warn:threshold` | `1h` | Rate-limit for warnings. |
+| `zep:alert:info:threshold` | `24h` | Rate-limit for info alerts. |
+| `zep:alert:heartbeat:<label>` | — | Max age before triggering a heartbeat-lost alert (e.g. `2h`). |
 
 ## Exit Codes
 
-Zep returns meaningful exit codes for both replication and `--status` commands, suitable for automation and monitoring integrations.
+| Code | Meaning |
+| :--- | :--- |
+| `0` | Success — all nodes replicated. |
+| `1` | Error — non-recoverable failure (unreachable master, invalid args, policy=fail abort). |
+| `2` | Split-brain — data divergence detected; replication halted. |
+| `3` | Partial success — resilience mode skipped one or more nodes. |
 
-### Replication
-
-| Code | Meaning | Description |
-| :--- | :--- | :--- |
-| `0` | **Success** | All nodes in the chain replicated successfully. |
-| `1` | **Error** | A non-recoverable error occurred (e.g., unreachable master, invalid arguments). With `zep:policy=fail` (default), replication aborts on the first failure. |
-| `2` | **Split-Brain** | Data divergence detected on a downstream dataset. Replication is halted to prevent silent data loss. The `zep:error:split-brain` property is set to `true` on the affected dataset. Recovery requires a `zfs rollback -r` to the latest common snapshot. |
-| `3` | **Partial Success** | With `zep:policy=resilience`, one or more downstream nodes were skipped (split-brain or unreachable) but the remaining chain continued. Review the output to identify skipped nodes. |
-
-### `--status`
-
-| Code | Meaning | Description |
-| :--- | :--- | :--- |
-| `0` | **OK** | All nodes and snapshots in the chain are healthy. |
-| `1` | **Warning** | Some snapshots are stale or retention thresholds are not met. |
-| `2` | **Critical** | One or more nodes are unreachable, split-brain is detected, or zpool capacity is critically low. |
+`--status` exit codes: `0` = all healthy, `1` = warnings, `2` = critical.
 
 ## Modular Structure
-The project is split into several libraries for easier testing:
-- `zfs-common.lib.sh`: Core utilities and property resolution.
-- `zfs-alerts.lib.sh`: SMTP notification logic.
-- `zfs-retention.lib.sh`: Snapshot rotation logic.
-- `zfs-transfer.lib.sh`: The core replication engine.
-- `zeplicator`: The main orchestrator script.
 
-Use `make` to compile these into a single `build/zep` executable for distribution.
+| File | Purpose |
+| :--- | :--- |
+| `zeplicator` | Orchestrator — arg parsing, mode dispatch, promotion, cascade logic. |
+| `zfs-common.lib.sh` | Property cache, logging, locks, node resolution, time parsing. |
+| `zfs-transfer.lib.sh` | Replication engine — `zfs send`/`recv` pipelines, donor discovery, split-brain. |
+| `zfs-retention.lib.sh` | Snapshot rotation — shipped-aware purge, retention resolution. |
+| `zfs-alerts.lib.sh` | SMTP alerting with per-dataset rate-limiting. |
+| `zfs-status.lib.sh` | `--status` dashboard — chain health, pool stats, snapshot freshness. |
+| `zfs-stats.lib.sh` | `--stats` wire protocol for remote status calls. |
+| `iomon.c` | C pipe monitor for byte-progress tracking in send/recv pipelines. |
+| `Makefile` | Assembles libraries into `build/zep` and compiles `iomon`. |
+
+## Development
+
+```bash
+make                    # build/zep + build/iomon
+bash tests/zep_replication_tests.sh      # run test suite
+bash tests/zep_replication_tests.sh 1    # run specific test
+bash tests/zep_replication_tests.sh --list  # list all tests
+```
+
+Tests simulate a 3-node chain on a single machine using tmpfs ramdisk pools,
+mock DNS, and per-node SSH users. See `tests/README.txt` for details.
 
 ## Credits
-This script incorporates core logic from `zfsbud.sh` by [Pawel Ginalski (gbyte.dev)](https://gbyte.dev).
+
+Core transfer logic adapted from `zfsbud.sh` by [Pawel Ginalski (gbyte.dev)](https://gbyte.dev).
