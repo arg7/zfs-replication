@@ -21,7 +21,7 @@ int     g_cnt_active = 0;
 int     g_cnt_interval = 1;
 time_t  g_last_update = 0;
 
-static void write_progress() {
+static void write_progress(void) {
     if (!g_cnt_active || !g_cnt_file[0]) return;
     FILE *fp = fopen(g_cnt_file, "w");
     if (fp) {
@@ -30,7 +30,7 @@ static void write_progress() {
     }
 }
 
-static void maybe_update_counter() {
+static void maybe_update_counter(void) {
     if (!g_cnt_active) return;
     time_t now = time(NULL);
     if (now - g_last_update >= g_cnt_interval) {
@@ -39,7 +39,8 @@ static void maybe_update_counter() {
     }
 }
 
-void handle_signal(int sig) {
+static void handle_signal(int sig) {
+    (void)sig;
     write_progress();
     exit(0);
 }
@@ -144,10 +145,9 @@ int main(int argc, char *argv[]) {
     unsigned char *buffer = malloc(BUF_SIZE);
     if (!buffer) return 1;
 
-    if (max_bytes > 0 && max_bytes < BUF_SIZE) {
-        unsigned char *smaller = realloc(buffer, max_bytes);
-        if (smaller) buffer = smaller;
-    }
+    size_t read_size = BUF_SIZE;
+    if (max_bytes > 0 && (size_t)max_bytes < read_size)
+        read_size = (size_t)max_bytes;
 
     time_t start_time = time(NULL);
 
@@ -194,7 +194,7 @@ int main(int argc, char *argv[]) {
 
         if (sel == 0) continue;
 
-        ssize_t bytes_read = read(STDIN_FILENO, buffer, BUF_SIZE);
+        ssize_t bytes_read = read(STDIN_FILENO, buffer, read_size);
         if (bytes_read <= 0) break;
 
         ssize_t bytes_written = 0;
