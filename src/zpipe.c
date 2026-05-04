@@ -5,17 +5,22 @@
 #include <string.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <getopt.h>
 
-#define BUF_SIZE 1024 * 1024
+#define BUF_SIZE (1024 * 1024)
 #define WRITE_CHUNK 1024
 #define IOMON_STATUS_MAXBYTES 142
 #define IOMON_STATUS_TIMEOUT 143
 
-char g_cnt_file[1024];
 unsigned long long g_total_bytes = 0;
+char g_cnt_file[1024] = {0};
+int  g_cnt_active = 0;
+int  g_cnt_interval = 1;
 
-void write_progress() {
+static void write_progress() {
+    if (!g_cnt_active || !g_cnt_file[0]) return;
     FILE *fp = fopen(g_cnt_file, "w");
     if (fp) {
         fprintf(fp, "%llu\n", g_total_bytes);
@@ -43,93 +48,84 @@ static int parse_rate(const char *s) {
     return (int)val;
 }
 
+static int mkdir_p(const char *path) {
+    char tmp[1024];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return -1;
+            *p = '/';
+        }
+    }
+    return 0;
+}
+
 static void print_usage(const char *prog) {
     fprintf(stderr,
-        "Usage: %s [OPTIONS] <lock_file> <interval_sec>\n"
+        "Usage: %s [OPTIONS]\n"
         "\n"
-        "Pipeline monitor for zfs send/recv. Reads from stdin, writes to stdout,\n"
-        "periodically updates a .cnt progress file.\n"
+        "Pipeline monitor for zfs send/recv. Reads from stdin, writes to stdout.\n"
         "\n"
         "Options:\n"
-        "  -t, --timeout SEC    Exit with code %d after SEC seconds of runtime\n"
-        "  -r, --throttle BYTES Throttle write rate (e.g. 32k, 1M)\n"
-        "  -c, --cut BYTES      Exit with code %d after transferring BYTES\n"
-        "  -h, --help           Show this help\n"
-        "\n"
-        "Backward-compatible positional form:\n"
-        "  %s <lock_file> <interval> [timeout] [rate] [max_bytes]\n",
-        prog, IOMON_STATUS_TIMEOUT, IOMON_STATUS_MAXBYTES, prog);
+        "  -t, --timeout SEC         Exit with code %d after SEC seconds of runtime\n"
+        "  -r, --throttle BYTES      Throttle write rate (e.g. 32k, 1M)\n"
+        "  -c, --cut BYTES           Exit with code %d after transferring BYTES\n"
+        "      --counter PATH        Write live byte counter to PATH every interval\n"
+        "      --counter-interval S  Update counter every S seconds (default: 1)\n"
+        "  -h, --help                Show this help\n",
+        prog, IOMON_STATUS_TIMEOUT, IOMON_STATUS_MAXBYTES);
 }
 
 int main(int argc, char *argv[]) {
     int timeout_sec = 0;
     int write_rate = 0;
     int max_bytes = 0;
-    int opt_help = 0;
+    const char *counter_path = NULL;
+    int counter_interval = 1;
 
     static struct option long_opts[] = {
-        {"timeout",  required_argument, 0, 't'},
-        {"throttle", required_argument, 0, 'r'},
-        {"cut",      required_argument, 0, 'c'},
-        {"help",     no_argument,       0, 'h'},
+        {"timeout",          required_argument, 0, 't'},
+        {"throttle",         required_argument, 0, 'r'},
+        {"cut",              required_argument, 0, 'c'},
+        {"counter",          required_argument, 0, 'C'},
+        {"counter-interval", required_argument, 0, 'I'},
+        {"help",             no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
-    // Check if any dashed options are present; if so, use getopt.
-    int has_dashed = 0;
-    for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '-') { has_dashed = 1; break; }
-    }
-
-    if (has_dashed) {
-        int c;
-        while ((c = getopt_long(argc, argv, "t:r:c:h", long_opts, NULL)) != -1) {
-            switch (c) {
-                case 't': timeout_sec = atoi(optarg); break;
-                case 'r': write_rate = parse_rate(optarg); break;
-                case 'c': max_bytes  = parse_rate(optarg); break;
-                case 'h': opt_help = 1; break;
-                default:
-                    fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
-                    return 1;
-            }
+    int c;
+    while ((c = getopt_long(argc, argv, "t:r:c:h", long_opts, NULL)) != -1) {
+        switch (c) {
+            case 't': timeout_sec = atoi(optarg); break;
+            case 'r': write_rate = parse_rate(optarg); break;
+            case 'c': max_bytes  = parse_rate(optarg); break;
+            case 'C': counter_path = optarg; break;
+            case 'I': counter_interval = atoi(optarg); break;
+            case 'h': print_usage(argv[0]); return 0;
+            default:
+                fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
+                return 1;
         }
     }
 
-    if (opt_help) {
-        print_usage(argv[0]);
-        return 0;
-    }
+    if (counter_path) {
+        if (counter_interval <= 0) counter_interval = 1;
 
-    const char *lock_base = NULL;
-    int interval = 0;
+        snprintf(g_cnt_file, sizeof(g_cnt_file), "%s", counter_path);
 
-    if (has_dashed) {
-        // Positional args are after --options
-        int pos = optind;
-        if (pos + 2 > argc) {
-            fprintf(stderr, "%s: missing required positional args <lock_file> <interval_sec>\n", argv[0]);
-            fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
-            return 1;
+        char dir[1024];
+        snprintf(dir, sizeof(dir), "%s", counter_path);
+        char *last_slash = strrchr(dir, '/');
+        if (last_slash) {
+            *last_slash = '\0';
+            if (mkdir_p(dir) != 0)
+                fprintf(stderr, "zpipe: cannot create counter directory %s: %s\n", dir, strerror(errno));
         }
-        lock_base = argv[pos];
-        interval  = atoi(argv[pos + 1]);
-    } else {
-        // Pure positional (backward compatible)
-        if (argc < 3) {
-            print_usage(argv[0]);
-            return 1;
-        }
-        lock_base = argv[1];
-        interval  = atoi(argv[2]);
-        if (argc >= 4) timeout_sec = atoi(argv[3]);
-        if (argc >= 5) write_rate  = parse_rate(argv[4]);
-        if (argc >= 6) max_bytes   = parse_rate(argv[5]);
+
+        g_cnt_active = 1;
+        g_cnt_interval = counter_interval;
     }
-
-    if (interval <= 0) interval = 1;
-
-    snprintf(g_cnt_file, sizeof(g_cnt_file), "%s.cnt", lock_base);
 
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
@@ -199,7 +195,7 @@ int main(int argc, char *argv[]) {
         }
 
         time_t now = time(NULL);
-        if (now - last_update >= interval) {
+        if (g_cnt_active && now - last_update >= g_cnt_interval) {
             write_progress();
             last_update = now;
         }

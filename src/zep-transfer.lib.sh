@@ -459,12 +459,12 @@ zfsbud_core() {
     [[ "$zpipe_rate" == "-" ]] && zpipe_rate=""
     local zpipe_max_bytes=$(get_zfs_prop "zep:debug:send_maxbytes" "$local_ds")
     [[ "$zpipe_max_bytes" == "-" ]] && zpipe_max_bytes=""
-    local args=""
+    local args="--counter ${lock_path}.cnt"
     [[ -n "$zpipe_timeout" && "$zpipe_timeout" != "0" ]] && args+=" --timeout $zpipe_timeout"
     [[ -n "$zpipe_rate" && "$zpipe_rate" != "0" ]] && args+=" --throttle $zpipe_rate"
     [[ -n "$zpipe_max_bytes" && "$zpipe_max_bytes" != "0" ]] && args+=" --cut $zpipe_max_bytes"
-    log_message "ZPIPE: lock=$lock_path interval=1 timeout=$zpipe_timeout rate=$zpipe_rate max_bytes=$zpipe_max_bytes"
-    local pipeline="zfs send $send_opt 2>>\"$err_log\" | zpipe \"$lock_path\" 1${args} | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
+    log_message "ZPIPE: counter=${lock_path}.cnt timeout=$zpipe_timeout rate=$zpipe_rate max_bytes=$zpipe_max_bytes"
+    local pipeline="zfs send $send_opt 2>>\"$err_log\" | zpipe ${args} | mbuffer -q $mbuffer_throttle -m \"$mbuffer_size\" 2>>\"$err_log\""
     if [[ -n "$remote_shell" ]]; then
         pipeline+=" | zstd 2>>\"$err_log\" | $remote_shell -o ConnectTimeout=\"$ssh_t\" \"zstd -d | zfs recv $recv_opt $remote_ds\" 2>>\"$err_log\""
     else
