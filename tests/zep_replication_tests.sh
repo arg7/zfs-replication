@@ -84,6 +84,7 @@ _test_table() {
 18|FOREIGN DATASET|test_foreign_dataset
 19|MISSING PERMISSIONS|test_missing_perms
 20|MISSING POOL|test_missing_pool
+21|ZPIPE UNIT|test_zpipe
 TABLE
 }
 
@@ -934,6 +935,59 @@ test_missing_pool() {
     assert_exit "status exit !0" "!0" "$rc"
     assert_out  "status missing" "$out" "MISSING"
     zpool import -f -d /tmp/zep-ramdisk zep-node-3 2>/dev/null || true
+}
+
+test_zpipe() {
+    local ZP
+    ZP=$(command -v zpipe)
+    local tmp="/tmp/zpipe_test_$$"
+    rm -rf "$tmp" && mkdir -p "$tmp"
+
+    # ── passthrough ─────────────────────────────────────
+    local out; out=$(printf '%s' "hello zpipe" | "$ZP")
+    assert_eq "passthrough" "hello zpipe" "$out"
+
+    # ── --help ──────────────────────────────────────────
+    out=$("$ZP" --help 2>&1); local rc=$?
+    assert_exit "--help exit 0" "0" "$rc"
+    assert_out "--help usage" "$out" "Usage:"
+
+    # ── --counter writes byte count ─────────────────────
+    local cnt="${tmp}/counter.cnt"
+    printf '%s' "1234567890" | "$ZP" --counter "$cnt" > /dev/null
+    assert_eq "--counter 10 bytes" "10" "$(cat "$cnt" 2>/dev/null)"
+
+    # ── --cut exits 142 ─────────────────────────────────
+    dd if=/dev/zero bs=1024 count=10 2>/dev/null \
+        | "$ZP" --cut 5 > /dev/null 2>"${tmp}/cut.err"
+    rc=${PIPESTATUS[1]}
+    out=$(<"${tmp}/cut.err")
+    assert_exit "--cut exit 142" "142" "$rc"
+    assert_out "--cut message" "$out" "max-bytes limit after"
+
+    # ── --timeout exits 143 ─────────────────────────────
+    sleep 3 | "$ZP" --timeout 1 > /dev/null 2>"${tmp}/timeout.err"
+    rc=${PIPESTATUS[1]}
+    out=$(<"${tmp}/timeout.err")
+    assert_exit "--timeout exit 143" "143" "$rc"
+    assert_out "--timeout message" "$out" "timeout after"
+
+    # ── no counter file when --counter omitted ──────────
+    printf "data" | "$ZP" > /dev/null
+    if [[ -f "${tmp}/nocounter.cnt" ]]; then
+        echo -e "  ${RED}FAIL${RESET} no-counter: unexpected file"; _fail_log; ((FAIL++))
+    else
+        echo -e "  ${GREEN}PASS${RESET} no-counter: no file created"; ((PASS++))
+    fi
+
+    # ── --throttle takes measurable time ────────────────
+    local start; start=$(date +%s)
+    dd if=/dev/zero bs=1M count=2 2>/dev/null \
+        | "$ZP" --throttle 256k > /dev/null
+    local elapsed; elapsed=$(($(date +%s) - start))
+    assert_ge "--throttle 2MB@256k takes >=4s" "$elapsed" 4
+
+    rm -rf "$tmp"
 }
 
 # ── dispatch ─────────────────────────────────────────────
