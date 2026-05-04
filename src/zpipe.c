@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/select.h>
 #include <getopt.h>
 
 #define BUF_SIZE (1024 * 1024)
@@ -15,9 +16,10 @@
 #define IOMON_STATUS_TIMEOUT 143
 
 unsigned long long g_total_bytes = 0;
-char g_cnt_file[1024] = {0};
-int  g_cnt_active = 0;
-int  g_cnt_interval = 1;
+char    g_cnt_file[1024] = {0};
+int     g_cnt_active = 0;
+int     g_cnt_interval = 1;
+time_t  g_last_update = 0;
 
 static void write_progress() {
     if (!g_cnt_active || !g_cnt_file[0]) return;
@@ -25,6 +27,15 @@ static void write_progress() {
     if (fp) {
         fprintf(fp, "%llu\n", g_total_bytes);
         fclose(fp);
+    }
+}
+
+static void maybe_update_counter() {
+    if (!g_cnt_active) return;
+    time_t now = time(NULL);
+    if (now - g_last_update >= g_cnt_interval) {
+        write_progress();
+        g_last_update = now;
     }
 }
 
@@ -139,8 +150,6 @@ int main(int argc, char *argv[]) {
     }
 
     time_t start_time = time(NULL);
-    time_t last_update = 0;
-    ssize_t bytes_read;
 
     int chunk_size = (write_rate > 0 && write_rate < WRITE_CHUNK) ? write_rate : WRITE_CHUNK;
     struct timespec chunk_delay = {0, 0};
@@ -150,15 +159,43 @@ int main(int argc, char *argv[]) {
         chunk_delay.tv_nsec = (long)(delay_ns - chunk_delay.tv_sec * 1000000000.0);
     }
 
-    write_progress();
+    maybe_update_counter();
 
-    while ((bytes_read = read(STDIN_FILENO, buffer, BUF_SIZE)) > 0) {
-        if (timeout_sec > 0 && (time(NULL) - start_time >= timeout_sec)) {
+    while (1) {
+        if (timeout_sec > 0 && time(NULL) - start_time >= timeout_sec) {
             fprintf(stderr, "zpipe: timeout after %ds\n", timeout_sec);
             write_progress();
             free(buffer);
             return IOMON_STATUS_TIMEOUT;
         }
+
+        int wait_sec = -1;
+        if (g_cnt_active && g_cnt_interval > 0)
+            wait_sec = g_cnt_interval;
+        if (timeout_sec > 0) {
+            int remaining = timeout_sec - (int)(time(NULL) - start_time);
+            if (remaining < 0) remaining = 0;
+            if (wait_sec < 0 || remaining < wait_sec) wait_sec = remaining;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(STDIN_FILENO, &rfds);
+        struct timeval tv, *ptv = NULL;
+        if (wait_sec >= 0) { tv.tv_sec = wait_sec; tv.tv_usec = 0; ptv = &tv; }
+
+        int sel = select(STDIN_FILENO + 1, &rfds, NULL, NULL, ptv);
+        if (sel < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+
+        maybe_update_counter();
+
+        if (sel == 0) continue;
+
+        ssize_t bytes_read = read(STDIN_FILENO, buffer, BUF_SIZE);
+        if (bytes_read <= 0) break;
 
         ssize_t bytes_written = 0;
         while (bytes_written < bytes_read) {
@@ -194,11 +231,7 @@ int main(int argc, char *argv[]) {
             return IOMON_STATUS_MAXBYTES;
         }
 
-        time_t now = time(NULL);
-        if (g_cnt_active && now - last_update >= g_cnt_interval) {
-            write_progress();
-            last_update = now;
-        }
+        maybe_update_counter();
     }
 
     write_progress();
