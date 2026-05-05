@@ -1,3 +1,29 @@
+// SPDX-License-Identifier: CDDL-1.0
+/*
+ * CDDL HEADER START
+ *
+ * The contents of this file are subject to the terms of the
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
+ *
+ * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+ * or https://opensource.org/licenses/CDDL-1.0.
+ * See the License for the specific language governing permissions
+ * and limitations under the License.
+ *
+ * When distributing Covered Code, include this CDDL HEADER in each
+ * file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+ * If applicable, add the following below this CDDL HEADER, with the
+ * fields enclosed by brackets "[]" replaced with your own identifying
+ * information: Portions Copyright [yyyy] [name of copyright owner]
+ *
+ * CDDL HEADER END
+ */
+
+/*
+ * Copyright (c) 2026 CompEd Software Design srl.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -197,6 +223,17 @@ int main(int argc, char *argv[]) {
         ssize_t bytes_read = read(STDIN_FILENO, buffer, read_size);
         if (bytes_read <= 0) break;
 
+        /*
+         * If we're approaching the max-bytes limit, trim this chunk
+         * so we pass exactly the requested number of bytes and no more.
+         */
+        if (max_bytes > 0) {
+            unsigned long long remaining =
+                (unsigned long long)max_bytes - g_total_bytes;
+            if ((unsigned long long)bytes_read > remaining)
+                bytes_read = (ssize_t)remaining;
+        }
+
         ssize_t bytes_written = 0;
         while (bytes_written < bytes_read) {
             if (timeout_sec > 0 && (time(NULL) - start_time >= timeout_sec)) {
@@ -229,6 +266,14 @@ int main(int argc, char *argv[]) {
             write_progress();
             free(buffer);
             return IOMON_STATUS_MAXBYTES;
+        }
+
+        /* Shrink read buffer for the next iteration if we're near the limit */
+        if (max_bytes > 0) {
+            unsigned long long remaining2 =
+                (unsigned long long)max_bytes - g_total_bytes;
+            if (remaining2 < read_size)
+                read_size = (size_t)remaining2;
         }
 
         maybe_update_counter();
