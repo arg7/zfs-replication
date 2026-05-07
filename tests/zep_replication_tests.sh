@@ -247,7 +247,11 @@ _pre_test_cleanup() {
     for i in 2 3; do
         zpool import -f -d /tmp/zep-ramdisk "zep-node-$i" 2>/dev/null || true
     done
+    zfs unmount zep-node-2/test-2 2>/dev/null || true
+    zfs set canmount=noauto zep-node-2/test-2 2>/dev/null || true
     _ssh_node 2 "zfs destroy -r zep-node-2/test-2" 2>/dev/null || true
+    zfs unmount zep-node-3/test-3 2>/dev/null || true
+    zfs set canmount=noauto zep-node-3/test-3 2>/dev/null || true
     _ssh_node 3 "zfs destroy -r zep-node-3/test-3" 2>/dev/null || true
     sleep 1
     # Re-ensure pool-level permissions survive dataset destruction
@@ -459,7 +463,7 @@ test_initial() {
     _before_guid=$(_latest_master_guid)
     out=$(run_zep --fs "$DS" --alias node1 --init); rc=$?
     assert_exit "exit 0"   "0" "$rc"
-    assert_out  "cascade"  "$out" "VERIFICATION SUCCESS"
+    assert_out  "cascade"  "$out" "completed successfully"
     assert_out  "shipped"  "$out" "Marking sent snapshot"
     local _sent_guid
     _sent_guid=$(_latest_master_guid)
@@ -489,7 +493,7 @@ test_incremental() {
 
     out=$(run_zep --fs "$DS" --alias node1 --label "$LABEL"); rc=$?
     assert_exit "exit 0"   "0" "$rc"
-    assert_out  "cascade"  "$out" "VERIFICATION SUCCESS"
+    assert_out  "cascade"  "$out" "completed successfully"
     _verify_guid_on_sink "inc GUID on node3" "$guid" "zep-node-3/test-3"
 }
 
@@ -673,7 +677,7 @@ test_resilience_recovery() {
 
     out=$(run_zep --fs "$DS" --alias node1 --label "$LABEL"); rc=$?
     assert_exit "restored exit 0" "0" "$rc"
-    assert_out  "cascade ok" "$out" "VERIFICATION SUCCESS"
+    assert_out  "cascade ok" "$out" "completed successfully"
 
     # Reset policy to fail for subsequent test runs
     "$ZEP_BIN" -bw --fs "$DS" --alias node1 --config policy=fail </dev/null > /dev/null
@@ -713,7 +717,7 @@ test_splitbrain_rollback() {
 
     out=$(run_zep --fs "$DS" --alias node1 --label "$LABEL"); rc=$?
     assert_exit "rollback recovery exit 0" "0" "$rc"
-    assert_out  "cascade ok" "$out" "VERIFICATION SUCCESS"
+    assert_out  "cascade ok" "$out" "completed successfully"
     _check_flag 2 "false"
 }
 
@@ -879,7 +883,7 @@ test_lost_common_donor() {
     out=$(run_zep --fs "$DS" --alias node1 --label "$LABEL"); rc=$?
     assert_exit "recovery exit 0"    "0"  "$rc"
     assert_out  "replication ok"     "$out" "Replication to zep-user-2@"
-    assert_out  "cascade ok"         "$out" "VERIFICATION SUCCESS"
+    assert_out  "cascade ok"         "$out" "completed successfully"
 
     # Latest snapshot on master after recovery must match sink (node3)
     latest_master_guid=$(zfs list -t snap -H -o guid -S creation -r "$DS" 2>/dev/null | head -1)

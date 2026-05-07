@@ -155,7 +155,7 @@ _setup_remote_node() {
 
     # 5. Delegate ZFS permissions
     echo "  Delegating ZFS permissions to $user..."
-    _root_ssh "$fqdn" "zfs allow '$user' create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff '$pool'"
+    _root_ssh "$fqdn" "zfs allow '$user' create,mount,receive,destroy,rollback,send,snapshot,hold,release,userprop,diff '$pool'"
     _root_ssh "$fqdn" "zfs allow '$user' create,destroy,send,receive,snapshot,hold,release,userprop '$ds'"
 
     echo "  ✅ node$i ($fqdn) ready"
@@ -216,7 +216,7 @@ _setup_local_node() {
 
     # Delegate ZFS permissions
     echo "  Delegating local ZFS permissions to $user..."
-    zfs allow "$user" create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff "$pool"
+    zfs allow "$user" create,mount,receive,destroy,rollback,send,snapshot,hold,release,userprop,diff "$pool"
     zfs allow "$user" create,destroy,send,receive,snapshot,hold,release,userprop "$ds"
 
     echo "  ✅ node1 (local) ready"
@@ -462,7 +462,7 @@ _setup_sim_user() {
     if [[ "$ZFS_FUSE" == "true" ]]; then
         echo "  ℹ️  zfs-fuse detected, skipping zfs allow delegation"
     else
-        zfs allow "$user" create,mount,receive,destroy,send,snapshot,hold,release,userprop,diff "$pool" 2>/dev/null || \
+        zfs allow "$user" create,mount,receive,destroy,rollback,send,snapshot,hold,release,userprop,diff "$pool" 2>/dev/null || \
             echo "  ⚠️  pool-level delegation failed (may need root)"
         zfs allow "$user" create,destroy,send,receive,snapshot,hold,release,userprop "$ds" 2>/dev/null || \
             echo "  ⚠️  dataset-level delegation failed (may need root)"
@@ -480,7 +480,6 @@ _setup_sim_mesh() {
         [[ -z "$ZEP_HOME_I" ]] && ZEP_HOME_I="/home/$user_i"
 
         for j in $(seq 1 "$NUM_NODES"); do
-            [[ $i -eq $j ]] && continue
             local user_j="$(get_node_user "$j")"
             local JHOME
             JHOME=$(getent passwd "$user_j" | cut -d: -f6)

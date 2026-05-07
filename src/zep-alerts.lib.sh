@@ -85,7 +85,7 @@ send_smtp_alert() {
         touch "$state_file"
         sed -i "/^$msg_hash /d" "$state_file"
         echo "$msg_hash $last_sent $supp_count" >> "$state_file"
-        echo "    🔇 Alert suppressed (${level}: ${elapsed}s < ${threshold}s). Count: $supp_count"
+        zbud_msg "  ${C_DIM}🔇${C_RESET} Alert suppressed (${level}: ${elapsed}s < ${threshold}s). Count: $supp_count"
         return
     fi
 

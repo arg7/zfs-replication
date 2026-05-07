@@ -40,7 +40,7 @@ purge_shipped_snapshots() {
         k_count=1000
     fi
 
-    echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄${C_RESET} Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
+    zbud_msg "  ${C_YELLOW}🔄${C_RESET} Performing shipped-aware rotation for $ds (label: $lbl, keep: $k_count)..."
 
     local prefix=$(get_snap_prefix "$ds")
     # Get snapshots matching label, sorted by creation date (newest first)
@@ -49,7 +49,7 @@ purge_shipped_snapshots() {
 
     local count=${#snapshots[@]}
     if [[ $count -le $k_count ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Snapshot count ($count) is within limit ($k_count). Skipping purge."
+        zbud_msg "  ${C_GREEN}✅${C_RESET} Snapshot count ($count) is within limit ($k_count). Skipping purge."
         return
     fi
 
@@ -67,7 +67,7 @@ purge_shipped_snapshots() {
     done < <(zfs get all -H -o property,value "$ds" 2>/dev/null | grep "^zep:node:" | grep "last_snapshot")
 
     if [[ ${#protected_guids[@]} -gt 0 ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_DIM}ℹ️${C_RESET}  Protecting ${#protected_guids[@]} snapshot(s) as per-node last_snapshot."
+        zbud_msg "  ${C_DIM}ℹ️${C_RESET}  Protecting ${#protected_guids[@]} snapshot(s) as per-node last_snapshot."
     fi
 
     # Check if any snapshot in the KEEP range has shipped — if so, older unshipped snaps are safe to remove
@@ -93,7 +93,7 @@ purge_shipped_snapshots() {
                 [[ -n "$_saved_fs" ]] && filesystem="$_saved_fs" || unset filesystem
                 alerted_protected=true
             fi
-            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING protected last_snapshot: $snap_name (GUID: $snap_guid)"
+            zbud_msg "  ${C_BLUE}🛡️${C_RESET}  KEEPING protected last_snapshot: $snap_name (GUID: $snap_guid)"
             kept_last_shipped=true
             newer_shipped=true
             continue
@@ -101,25 +101,25 @@ purge_shipped_snapshots() {
 
         if [[ "$shipped_val" == "true" ]]; then
             if [[ "$kept_last_shipped" == false ]]; then
-                echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING last shipped snapshot (common ground): $snap_name"
+                zbud_msg "  ${C_BLUE}🛡️${C_RESET}  KEEPING last shipped snapshot (common ground): $snap_name"
                 kept_last_shipped=true
                 newer_shipped=true
             elif [[ "$DRY_RUN" == true ]]; then
-                echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  [DRY RUN] Would purge old shipped snapshot: $snap_name"
+                zbud_msg "  ${C_RED}🗑️${C_RESET}  [DRY RUN] Would purge old shipped snapshot: $snap_name"
             else
-                echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  Purging old shipped snapshot: $snap_name"
+                zbud_msg "  ${C_RED}🗑️${C_RESET}  Purging old shipped snapshot: $snap_name"
                 zfs destroy "$snap_name" 2>/dev/null || {
-                    echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Cannot destroy $snap_name (clone origin?), keeping for safety."
+                    zbud_msg "  ${C_BLUE}🛡️${C_RESET}  Cannot destroy $snap_name (clone origin?), keeping for safety."
                     continue
                 }
                 purged_count=$((purged_count + 1))
             fi
         elif [[ "$newer_shipped" == true ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_RED}🗑️${C_RESET}  Purging old unshipped snapshot (newer shipped exists): $snap_name"
+            zbud_msg "  ${C_RED}🗑️${C_RESET}  Purging old unshipped snapshot (newer shipped exists): $snap_name"
             zfs destroy "$snap_name" 2>/dev/null || true
             purged_count=$((purged_count + 1))
         else
-            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
+            zbud_msg "  ${C_BLUE}🛡️${C_RESET}  KEEPING old snapshot (NOT YET SHIPPED): $snap_name"
         fi
     done
     if [[ "$purged_count" -gt 0 ]]; then

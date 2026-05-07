@@ -356,7 +356,7 @@ zfsbud_core() {
         div_rc=$?
 
         if [[ $div_rc -eq 2 ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  DIVERGENCE DETECTED${C_RESET} on $target_ds since snapshot @$common_snap_name"
+            zbud_msg "  ${C_YELLOW}⚠️  DIVERGENCE DETECTED${C_RESET} on $target_ds since snapshot @$common_snap_name"
             echo -e "$div_output" | while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
                 echo -e "${CHAIN_PREFIX}  | $line"

@@ -74,7 +74,7 @@ Advanced Flags:
   --snap <name>     Specify a literal snapshot name to use for promotion/rollback.
   --apply-props <b> Apply encoded replication properties and exit (internal).
   --target <node>   Point-to-point transfer to a specific node (ignores chain).
-  --donor           Run as a donor peer to heal a downstream node.
+  --donor           Run as a recovery peer to heal a downstream node.
   --divergence-report <snap>
                     Check a remote dataset for split-brain divergence (internal).
   -y                Assume 'yes' for destructive operations (promotion/rollback).
@@ -171,7 +171,7 @@ while [[ $# -gt 0 ]]; do
                 esac
             done
             ;;
-        -*) echo "❌ ERROR: Unknown flag: $1" >&2; echo "Run '$(basename "$0") --help' for usage." >&2; exit 1 ;;
+        -*) zep_err "Unknown flag: $1"; zep_info "Run '$(basename "$0") --help' for usage."; exit 1 ;;
         *) positional_args+=("$1"); shift ;; # Collect positional arguments
     esac
 done
@@ -227,11 +227,11 @@ validate_args() {
                 [[ "$_master" == "$_my_alias" ]] && _discovered+=("$_ds")
             done < <(zfs list -H -o name 2>/dev/null)
             if [[ ${#_discovered[@]} -eq 0 ]]; then
-                echo "ERR: No datasets found where this node ($_my_alias) is the master (first in chain)."
-                echo "Set zep:chain=<master>,<middle>,<sink> and zep:node:<alias>:fs on each dataset."
+                zep_err "No datasets found where this node ($_my_alias) is the master (first in chain)."
+                zep_info "Set zep:chain=<master>,<middle>,<sink> and zep:node:<alias>:fs on each dataset."
                 exit 1
             fi
-            echo "  ℹ️  No dataset specified — discovered ${#_discovered[@]} master dataset(s): ${_discovered[*]}"
+            zep_info "No dataset specified — discovered ${#_discovered[@]} master dataset(s): ${_discovered[*]}"
             # Re-invoke for each discovered dataset with the same flags
             _all_ok=true
             for _ds in "${_discovered[@]}"; do
@@ -273,12 +273,12 @@ validate_args() {
     fi
 
     if [[ ${#errors[@]} -gt 0 ]]; then
-        echo -e "${C_RED}❌ ERROR:${C_RESET} Invalid arguments:"
+        zep_err "Invalid arguments:"
         for err in "${errors[@]}"; do
-            echo "  - $err"
+            echo "  - $err" >&2
         done
-        [[ "$STATUS_MODE" != true && "$STATS_MODE" != true ]] && echo ""
-        [[ "$STATUS_MODE" != true && "$STATS_MODE" != true ]] && echo -e "${C_BOLD}Run '$(basename "$0") --help' for usage information.${C_RESET}"
+        [[ "$STATUS_MODE" != true && "$STATS_MODE" != true ]] && echo "" >&2
+        [[ "$STATUS_MODE" != true && "$STATS_MODE" != true ]] && zep_info "Run '$(basename "$0") --help' for usage information."
         exit 1
     fi
 }
@@ -309,11 +309,11 @@ if [[ "$STATUS_MODE" == true && -z "$raw_filesystem" ]]; then
         [[ "$_node_fs" == "$_ds" ]] && _discovered+=("$_ds")
     done < <(zfs list -H -o name 2>/dev/null)
     if [[ ${#_discovered[@]} -eq 0 ]]; then
-        echo "ERR: No datasets found where node $_my_alias manages the filesystem."
+        zep_err "No datasets found where node $_my_alias manages the filesystem."
         exit 1
     fi
     if [[ ${#_discovered[@]} -gt 1 ]]; then
-        echo "  ℹ️  No dataset specified — discovered ${#_discovered[@]} dataset(s) managed by ${_my_alias}: ${_discovered[*]}"
+        zep_info "No dataset specified — discovered ${#_discovered[@]} dataset(s) managed by ${_my_alias}: ${_discovered[*]}"
     fi
     _all_ok=true
     for _ds in "${_discovered[@]}"; do
@@ -365,7 +365,7 @@ if [[ "$CASCADED" != true ]]; then
     expected_ds=$(get_zfs_prop "zep:node:${my_hostname}:fs" "$raw_filesystem")
     if [[ -n "$expected_ds" && "$expected_ds" != "-" ]]; then
         if [[ ! "$local_ds" =~ ^"$expected_ds" ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️${C_RESET}  Filesystem $local_ds is not managed by node $my_hostname (configured: $expected_ds)"
+            zep_warn "Filesystem $local_ds is not managed by node $my_hostname (configured: $expected_ds)"
             exit 1
         fi
     fi
@@ -413,7 +413,7 @@ if [[ "$ROTATE_MODE" == true ]]; then
         done
     fi
 
-    echo -e "${C_CYAN}🔄${C_RESET} Rotation for $filesystem (node: $ME, role: ${ME_INDEX:+$([ $ME_INDEX -eq 0 ] && echo master || ([ $ME_INDEX -eq $((${#nodes[@]} - 1)) ] && echo sink || echo middle))})"
+    zep_info "Rotation for $filesystem (node: $ME, role: ${ME_INDEX:+$([ $ME_INDEX -eq 0 ] && echo master || ([ $ME_INDEX -eq $((${#nodes[@]} - 1)) ] && echo sink || echo middle))})"
 
     # Collect labels from snapshots
     declare -A seen_labels
@@ -426,7 +426,7 @@ if [[ "$ROTATE_MODE" == true ]]; then
     done < <(zfs list -t snapshot -H -o name -r "$local_ds" 2>/dev/null | grep "@${prefix}" | cut -d'@' -f2)
 
     if [[ ${#seen_labels[@]} -eq 0 ]]; then
-        echo "  No snapshots found with prefix '${prefix}'. Nothing to rotate."
+        zep_info "No snapshots found with prefix '${prefix}'. Nothing to rotate."
         exit 0
     fi
 
@@ -435,7 +435,7 @@ if [[ "$ROTATE_MODE" == true ]]; then
         purge_shipped_snapshots "$local_ds" "$lbl" "$keep"
     done
 
-    echo -e "${C_GREEN}✅${C_RESET} Rotation complete."
+    zep_ok "Rotation complete."
     exit 0
 fi
 
@@ -464,13 +464,13 @@ sync_chain_props() {
         done
     fi
 
-    echo "  ⚙️  Syncing replication properties..."
+    zep_info "Syncing replication properties..."
     for n in "${target_nodes[@]}"; do
         [[ "$n" == "$my_hostname" ]] && continue
         local n_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
         local n_user=$(resolve_node_user "$n" "$raw_filesystem")
         local n_ds=$(resolve_node_filesystem "$n" "$raw_filesystem")
-        echo -n "    - $n ($n_fqdn)... "
+        _zep_inline "- $n ($n_fqdn)... "
         
             ssh "${n_user}@${n_fqdn}" "bash -s" <<EOF >/dev/null 2>&1
             # Optimization: Cache ZFS properties for the remote dataset during sync
@@ -497,14 +497,14 @@ sync_chain_props() {
             done
 EOF
         if [[ $? -eq 0 ]]; then
-            echo "✅"
+            echo -e "${C_GREEN}✅${C_RESET}" 1>&2
         else
-            echo "❌"
+            echo -e "${C_RED}❌${C_RESET}" 1>&2
             unreachable+=("$n")
         fi
     done
     
-    echo ""
+    echo "" >&2
     return ${#unreachable[@]}
 }
 
@@ -528,7 +528,7 @@ handle_config() {
     local sync_all=false
 
     if [[ ${#args[@]} -eq 0 || "${args[0]}" == "--list" ]]; then
-        echo "  📋 Current Configuration for $filesystem:"
+        echo -e "  📋 Current Configuration for $filesystem:"
         zfs get all -H -o property,value "$filesystem" | grep "^zep:" | sed 's/^zep://' | sort | awk -F'\t' '{ printf "      %-30s %s\n", $1, $2 }'
         return
     fi
@@ -547,7 +547,7 @@ handle_config() {
             local fname="${args[((i+1))]}"
             [[ -z "$fname" || "$fname" == -* ]] && die "Missing filename for --export"
             
-            echo "  💾 Exporting configuration to $fname..."
+            zep_info "Exporting configuration to $fname..."
             zfs get all -H -o property,value "$filesystem" | grep "^zep:" | awk -F'\t' '{print $1"="$2}' > "$fname"
             i=$((i + 2))
             continue
@@ -557,7 +557,7 @@ handle_config() {
             local fname="${args[((i+1))]}"
             [[ -z "$fname" || ! -f "$fname" ]] && die "Missing or invalid filename for --import"
             
-            echo "  📥 Importing configuration from $fname..."
+            zep_info "Importing configuration from $fname..."
             while IFS= read -r line || [[ -n "$line" ]]; do
                 # Trim whitespaces
                 line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -569,8 +569,8 @@ handle_config() {
                     
                     key=$(expand_shorthand "$key")
                     
-                    echo "  ⚙️  Setting $key=$val on $filesystem"
-                    zfs set "$key=$val" "$filesystem" || echo "    ⚠️  Failed to set $key"
+                    zep_info "Setting $key=$val on $filesystem"
+                    zfs set "$key=$val" "$filesystem" || zep_warn "Failed to set $key"
                 fi
             done < "$fname"
             i=$((i + 2))
@@ -583,8 +583,8 @@ handle_config() {
             
             local full_key=$(expand_shorthand "$key")
 
-            echo "  ⚙️  Clearing $full_key from $filesystem..."
-            zfs inherit "$full_key" "$filesystem" || echo "    ⚠️  Failed to clear $full_key"
+            zep_info "Clearing $full_key from $filesystem..."
+            zfs inherit "$full_key" "$filesystem" || zep_warn "Failed to clear $full_key"
             i=$((i + 2))
             continue
         fi
@@ -595,10 +595,10 @@ handle_config() {
             
             local full_key=$(expand_shorthand "$key")
             
-            echo "  ⚙️  Setting $full_key=$val on $filesystem"
-            zfs set "$full_key"="$val" "$filesystem" || echo "    ⚠️  Failed to set $full_key"
+            zep_info "Setting $full_key=$val on $filesystem"
+            zfs set "$full_key"="$val" "$filesystem" || zep_warn "Failed to set $full_key"
         else
-            echo "  ⚠️  Ignoring invalid config argument: $arg (Expected key=value)"
+            zep_warn "Ignoring invalid config argument: $arg (Expected key=value)"
         fi
         i=$((i + 1))
     done
@@ -612,9 +612,9 @@ handle_config() {
         if [[ -n "$current_chain" && "$current_chain" != "-" ]]; then
             IFS=',' read -r -a nodes <<< "$current_chain"
             if sync_chain_props "$filesystem" "nodes"; then
-                echo "  🎉 SUCCESS: Configuration updated and synced across the chain."
+                zep_ok "Configuration updated and synced across the chain."
             else
-                echo "  ⚠️  PARTIAL SUCCESS: Configuration updated, but some nodes were unreachable during sync."
+                zep_warn "Configuration updated, but some nodes were unreachable during sync."
             fi
         fi
     fi
@@ -643,7 +643,7 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
         VAL="false"
     fi
 
-    echo "  🛡️  ${ACTION} replication for $raw_filesystem..."
+    zep_info "${ACTION} replication for $raw_filesystem..."
     
     CURRENT_CHAIN=$(get_zfs_prop "zep:chain" "$local_ds")
     if [[ -z "$CURRENT_CHAIN" ]]; then
@@ -655,8 +655,8 @@ if [[ "$SUSPEND" == true || "$RESUME" == true ]]; then
         n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
         n_user=$(resolve_node_user "$n" "$local_ds")
         n_ds=$(resolve_node_filesystem "$n" "$local_ds")
-        echo "    ⏳ Setting zep:suspend=$VAL on $n ($n_fqdn)..."
-        ssh "${n_user}@${n_fqdn}" "zfs set zep:suspend=$VAL ${n_ds}" || echo -e "  ${C_YELLOW}⚠️  WARNING:${C_RESET} Failed to set property on $n"
+        _zep_inline "Setting zep:suspend=$VAL on $n ($n_fqdn)..."
+        ssh "${n_user}@${n_fqdn}" "zfs set zep:suspend=$VAL ${n_ds}" && echo -e "${C_GREEN}✅${C_RESET}" 1>&2 || zep_warn "Failed to set property on $n"
     done
     
     send_smtp_alert "info" --task "replication" --status "${ACTION,,}" "NOTICE: ZFS Replication has been ${ACTION} for filesystem $raw_filesystem on $my_hostname. Master node: ${nodes[0]}. New state: zep:suspend=$VAL"
@@ -671,7 +671,7 @@ fi
 
 # Handle Promotion logic
 if [[ "$PROMOTE" == true ]]; then
-    echo "  🚀 Promoting $my_hostname to Master..."
+    zep_info "Promoting $my_hostname to Master..."
     
     CURRENT_CHAIN=$(get_zfs_prop "zep:chain" "$local_ds")
     if [[ -z "$CURRENT_CHAIN" ]]; then die "ERR: Cannot promote, no existing zep:chain found on $local_ds"; fi
@@ -686,7 +686,7 @@ if [[ "$PROMOTE" == true ]]; then
     NEW_CHAIN=$(IFS=','; echo "${NEW_NODES[*]}")
     
     if [[ "$CURRENT_CHAIN" == "$NEW_CHAIN" ]]; then
-        echo "  $my_hostname is already Master in local config."
+        zep_info "$my_hostname is already Master in local config."
         exit 0
     fi
 
@@ -697,61 +697,61 @@ if [[ "$PROMOTE" == true ]]; then
 
         if [[ -n "$PROMOTE_SNAP" ]]; then
             TARGET_SNAP="$PROMOTE_SNAP"
-            echo "  🔍 Verifying snapshot @$TARGET_SNAP consistency..."
+    zep_info "Verifying snapshot @$TARGET_SNAP consistency..."
             for n in "${NEW_NODES[@]}"; do
-                echo -n "    - $n... "
+                _zep_inline "- $n... "
                 local_ds_target=$(resolve_node_filesystem "$n" "$raw_filesystem")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
                 local_user=$(resolve_node_user "$n" "$raw_filesystem")
 
                 # Validate node configuration before attempting verification
                 if [[ "$local_fqdn" == "-" || -z "$local_fqdn" ]]; then
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
-                    echo ""
-                    echo "      ⚠️  WARNING: No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
+                    echo "" >&2
+                    zep_warn "No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
                     continue
                 fi
                 if [[ "$local_ds_target" == "-" || -z "$local_ds_target" ]]; then
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
-                    echo ""
-                    echo "      ⚠️  WARNING: No filesystem configured for node '$n'. Set zep:node:${n}:fs"
+                    echo "" >&2
+                    zep_warn "No filesystem configured for node '$n'. Set zep:node:${n}:fs"
                     continue
                 fi
 
                 g=$(ssh "${local_user}@${local_fqdn}" "zfs get -H -o value guid ${local_ds_target}@$TARGET_SNAP" 2>/dev/null)
                 if [[ -n "$g" && "$g" != "-" ]]; then
-                    echo "✅"
+                    echo -e "${C_GREEN}✅${C_RESET}" 1>&2
                     REACHABLE_NODES+=("$n")
                 else
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
                 fi
             done
             [[ -z "${REACHABLE_NODES[0]}" ]] && die "ERR: Snapshot @$TARGET_SNAP not found on any reachable node."
         else
-            echo "  🔍 Auto-discovering latest common snapshot..."
+            zep_info "Auto-discovering latest common snapshot..."
             tmp_common="/tmp/${REPL_SNAP_PREFIX}${my_hostname}-common-snaps.$$"
             f_node_flag=true
 
             for n in "${NEW_NODES[@]}"; do
-                echo -n "    - Querying $n... "
+                _zep_inline "- Querying $n... "
                 local_ds_target=$(resolve_node_filesystem "$n" "$raw_filesystem")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
                 local_user=$(resolve_node_user "$n" "$raw_filesystem")
 
                 # Validate node configuration before attempting query
                 if [[ "$local_fqdn" == "-" || -z "$local_fqdn" ]]; then
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
-                    echo "      ⚠️  WARNING: No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
+                    zep_warn "No FQDN configured for node '$n'. Set zep:node:${n}:fqdn"
                     continue
                 fi
                 if [[ "$local_ds_target" == "-" || -z "$local_ds_target" ]]; then
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
-                    echo "      ⚠️  WARNING: No filesystem configured for node '$n'. Set zep:node:${n}:fs"
+                    zep_warn "No filesystem configured for node '$n'. Set zep:node:${n}:fs"
                     continue
                 fi
 
@@ -768,7 +768,7 @@ if [[ "$PROMOTE" == true ]]; then
                 fi
 
                 if [[ "$query_ok" == true ]]; then
-                    echo "✅"
+                    echo -e "${C_GREEN}✅${C_RESET}" 1>&2
                     REACHABLE_NODES+=("$n")
                     if [[ "$f_node_flag" == true ]]; then
                         mv "$node_tmp" "$tmp_common"
@@ -779,7 +779,7 @@ if [[ "$PROMOTE" == true ]]; then
                         rm -f "$node_tmp"
                     fi
                 else
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     UNREACHABLE_NODES+=("$n")
                     rm -f "$node_tmp"
                 fi
@@ -798,7 +798,7 @@ if [[ "$PROMOTE" == true ]]; then
                     local_info=$(zfs list -t snapshot -H -o name,guid -r "$local_ds" | grep "$TARGET_GUID" | head -n 1)
                     TARGET_SNAP=$(echo "$local_info" | awk '{print $1}' | cut -d'@' -f2)
                     target_guid=$(echo "$local_info" | awk '{print $2}')
-                    echo "  🔗 Found latest common snapshot: @$TARGET_SNAP"
+                    zep_info "Found latest common snapshot: @$TARGET_SNAP"
                 else
                     die "ERR: Could not resolve any common snapshot GUID locally."
                 fi
@@ -807,7 +807,7 @@ if [[ "$PROMOTE" == true ]]; then
         fi
 
         if [[ "$ALIGN_CHAIN_DATA" == true && -n "$TARGET_SNAP" ]]; then
-            echo "ABORT: Common snapshot @$TARGET_SNAP found! Use --auto instead of --align-chain-data."
+            zep_err "Common snapshot @$TARGET_SNAP found! Use --auto instead of --align-chain-data."
             exit 1
         fi
         
@@ -822,20 +822,20 @@ if [[ "$PROMOTE" == true ]]; then
                 if [[ "$resp" != "y" ]]; then die "Aborted by user."; fi
             fi
 
-            echo "  🔄 Rolling back reachable nodes to @$TARGET_SNAP..."
+            zep_info "Rolling back reachable nodes to @$TARGET_SNAP..."
             for n in "${REACHABLE_NODES[@]}"; do
-                echo -n "    - $n... "
+                _zep_inline "- $n... "
                 local_ds_target=$(resolve_node_filesystem "$n" "$raw_filesystem")
                 local_fqdn=$(resolve_node_fqdn "$n" "$raw_filesystem")
                 local_user=$(resolve_node_user "$n" "$raw_filesystem")
                 if [[ "$n" == "$my_hostname" ]]; then
-                    zfs rollback -r "${local_ds_target}@$TARGET_SNAP" && echo "✅" || die "ERR: Local rollback failed"
+                    zfs rollback -r "${local_ds_target}@$TARGET_SNAP" && echo -e "${C_GREEN}✅${C_RESET}" 1>&2 || die "ERR: Local rollback failed"
                 else
-                    ssh "${local_user}@${local_fqdn}" "zfs rollback -r ${local_ds_target}@$TARGET_SNAP" && echo "✅" || echo "❌"
+                    ssh "${local_user}@${local_fqdn}" "zfs rollback -r ${local_ds_target}@$TARGET_SNAP" && echo -e "${C_GREEN}✅${C_RESET}" 1>&2 || echo -e "${C_RED}❌${C_RESET}" 1>&2
                 fi
             done
             
-            echo "  ✨ Updating local chain configuration..."
+            zep_info "Updating local chain configuration..."
             zfs set zep:chain="$NEW_CHAIN" "$local_ds"
             REPL_CHAIN="$NEW_CHAIN"
             send_smtp_alert "info" --task "promotion" --status "complete" "NOTICE: Node $my_hostname has been PROMOTED to Master for filesystem $raw_filesystem. New chain: $NEW_CHAIN"
@@ -844,7 +844,7 @@ if [[ "$PROMOTE" == true ]]; then
 
             # Propagate the new chain to all downstream nodes in order
             _props_encoded=$(get_repl_props_encoded "$local_ds")
-            echo "  🔄 Propagating new chain configuration to downstream nodes..."
+            zep_info "Propagating new chain configuration to downstream nodes..."
             _unreachable_count=0
             for _n in "${NEW_NODES[@]}"; do
                 [[ "$_n" == "$my_hostname" ]] && continue
@@ -854,40 +854,40 @@ if [[ "$PROMOTE" == true ]]; then
 
                 # Validate node configuration before attempting propagation
                 if [[ "$_n_fqdn" == "-" || -z "$_n_fqdn" ]]; then
-                    echo "❌"
-                    echo "      ⚠️  WARNING: No FQDN configured for node '$_n'. Skipping."
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
+                    zep_warn "No FQDN configured for node '$_n'. Skipping."
                     _unreachable_count=$((_unreachable_count + 1))
                     continue
                 fi
                 if [[ "$_n_ds" == "-" || -z "$_n_ds" ]]; then
-                    echo "❌"
-                    echo "      ⚠️  WARNING: No filesystem configured for node '$_n'. Skipping."
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
+                    zep_warn "No filesystem configured for node '$_n'. Skipping."
                     _unreachable_count=$((_unreachable_count + 1))
                     continue
                 fi
 
-                echo -n "    - $_n ($_n_fqdn)... "
+                _zep_inline "- $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
                     "zep --fs $raw_filesystem --label $label --keep $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
                 if [[ $_ssh_rc -eq 0 ]]; then
-                    echo "✅"
+                    echo -e "${C_GREEN}✅${C_RESET}" 1>&2
                 else
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     _unreachable_count=$((_unreachable_count + 1))
                 fi
             done
 
             if [[ $_unreachable_count -eq 0 ]]; then
-                echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+                zep_ok "Promotion complete! Node $my_hostname is now Master."
             else
-                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but $_unreachable_count node(s) were unreachable during prop sync."
-                echo "     Replication will attempt to heal them during the next cycle."
+                zep_warn "Node $my_hostname is Master, but $_unreachable_count node(s) were unreachable during prop sync."
+                zep_info "Replication will attempt to heal them during the next cycle."
             fi
             exit 0
         else
             # --promote --align-chain-data (no --auto or --snap): set new chain without rollback
-            echo "  ✨ Setting new chain configuration without rollback..."
+            zep_info "Setting new chain configuration without rollback..."
             zfs set zep:chain="$NEW_CHAIN" "$local_ds"
             REPL_CHAIN="$NEW_CHAIN"
             cache_zfs_props "$local_ds"
@@ -902,34 +902,34 @@ if [[ "$PROMOTE" == true ]]; then
 
                 # Validate node configuration before attempting propagation
                 if [[ "$_n_fqdn" == "-" || -z "$_n_fqdn" ]]; then
-                    echo "❌"
-                    echo "      ⚠️  WARNING: No FQDN configured for node '$_n'. Skipping."
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
+                    zep_warn "No FQDN configured for node '$_n'. Skipping."
                     _unreachable_count=$((_unreachable_count + 1))
                     continue
                 fi
                 if [[ "$_n_ds" == "-" || -z "$_n_ds" ]]; then
-                    echo "❌"
-                    echo "      ⚠️  WARNING: No filesystem configured for node '$_n'. Skipping."
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
+                    zep_warn "No filesystem configured for node '$_n'. Skipping."
                     _unreachable_count=$((_unreachable_count + 1))
                     continue
                 fi
 
-                echo -n "    - $_n ($_n_fqdn)... "
+                _zep_inline "- $_n ($_n_fqdn)... "
                 _ssh_rc=0
                 ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" "${_n_user}@${_n_fqdn}" \
                     "zep --fs $raw_filesystem --label $label --keep $keep_fallback --alias $_n --apply-props $_props_encoded" >/dev/null 2>&1 || _ssh_rc=$?
                 if [[ $_ssh_rc -eq 0 ]]; then
-                    echo "✅"
+                    echo -e "${C_GREEN}✅${C_RESET}" 1>&2
                 else
-                    echo "❌"
+                    echo -e "${C_RED}❌${C_RESET}" 1>&2
                     _unreachable_count=$((_unreachable_count + 1))
                 fi
             done
 
             if [[ $_unreachable_count -eq 0 ]]; then
-                echo "  🎉 SUCCESS: Promotion complete! Node $my_hostname is now Master."
+                zep_ok "Promotion complete! Node $my_hostname is now Master."
             else
-                echo "  ⚠️  PARTIAL SUCCESS: Node $my_hostname is Master, but $_unreachable_count node(s) unreachable."
+                zep_warn "Node $my_hostname is Master, but $_unreachable_count node(s) unreachable."
             fi
             exit 0
         fi
@@ -941,7 +941,7 @@ if [[ -n "$sync_props_data" ]]; then
     if zfs list "$local_ds" >/dev/null 2>&1; then
         apply_repl_props "$local_ds" "$sync_props_data"
     else
-        echo "INFO: Filesystem $local_ds not found, skipping property sync (likely initial run)."
+        zep_info "Filesystem $local_ds not found, skipping property sync (likely initial run)."
     fi
 fi
 
@@ -975,17 +975,17 @@ if [[ -n "$REPL_CHAIN" ]]; then
     
     # Pre-flight dependency check (only if --init is set and NOT a cascaded call)
     if [[ "$initial_send" == true && "$CASCADED" == false ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_CYAN}🛠️${C_RESET}  Pre-flight: Checking dependencies (mbuffer, zstd) across all nodes..."
+        zep_info "Pre-flight: Checking dependencies (mbuffer, zstd) across all nodes..."
         for n in "${nodes[@]}"; do
             n_fqdn=$(resolve_node_fqdn "$n" "$local_ds")
             n_user=$(resolve_node_user "$n" "$local_ds")
             
-            echo -e "${CHAIN_PREFIX}    ${C_CYAN}🔍${C_RESET} Checking $n ($n_fqdn)..."
+            zbud_msg "  ${C_CYAN}🔍${C_RESET} Checking $n ($n_fqdn)..."
             if ! timeout "$((REPL_SSH_TIMEOUT + 5))" ssh -o ConnectTimeout="$REPL_SSH_TIMEOUT" -o BatchMode=yes "${n_user}@${n_fqdn}" "which mbuffer >/dev/null && which zstd >/dev/null"; then
                 die "Missing dependencies (mbuffer or zstd) or connection timeout on node: $n ($n_fqdn). Please install them before proceeding with --init."
             fi
         done
-        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} All nodes verified."
+        zep_ok "All nodes verified."
 
         # Detect zfs-fuse: -u / -o flags are unsupported by zfs-fuse's zfs recv
         ZFS_FUSE_RECV=false
@@ -999,7 +999,7 @@ if [[ -n "$REPL_CHAIN" ]]; then
             fi
         done
         if [[ "$ZFS_FUSE_RECV" == "true" ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}ℹ️${C_RESET}  zfs-fuse detected on target(s) — normal, disabling unsupported -u/-o recv flags."
+            zep_info "zfs-fuse detected on target(s) — normal, disabling unsupported -u/-o recv flags."
         fi
     fi
 
@@ -1077,7 +1077,7 @@ if [[ -n "$REPL_CHAIN" ]]; then
     if [[ -n "$label" ]]; then
         dry_flag=""
         [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-        echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+        zep_hdr "Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
         RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
     fi
     fi
@@ -1117,26 +1117,26 @@ if [[ -n "$TARGET_NODE" ]]; then
 
         dry_flag=""
         [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-        echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label (target: $TARGET_NODE)"
+        zep_hdr "Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label (target: $TARGET_NODE)"
         RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
-        echo -e "${CHAIN_PREFIX}  ${C_BLUE}🛡️${C_RESET}  Using dynamic retention for $label: $RESOLVED_KEEP"
+        zep_info "Using dynamic retention for $label: $RESOLVED_KEEP"
     fi
 fi
 
 if [[ "$IS_MASTER" == false && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" && "$IS_DONOR" == false ]]; then
     if [[ "$CRON_MODE" == true ]]; then
-        echo "${CHAIN_PREFIX}  🔄 Node $ME is not Master. Running rotation only..."
+        zep_info "Node $ME is not Master. Running rotation only..."
         run_cron_rotate
         exit 0
     fi
-    echo "${CHAIN_PREFIX}  🛡️  Node $ME is not Master."
+    zep_info "Node $ME is not Master."
     exit 1
 fi
 
 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z "$TARGET_NODE" ]]; then
     SUSPEND_STATE=$(get_zfs_prop "zep:suspend" "$local_ds")
     if [[ "$SUSPEND_STATE" == "true" ]]; then
-        echo "${CHAIN_PREFIX}  🛑 Replication is SUSPENDED (zep:suspend=true). Skipping run."
+        zep_info "Replication is SUSPENDED (zep:suspend=true). Skipping run."
         exit 0
     fi
 fi
@@ -1162,7 +1162,7 @@ if [[ "$LABEL_EXPLICIT" != true && "$IS_MASTER" == true && "$CASCADED" == false 
         fi
         _labels=("${_filtered[@]}")
     fi
-    echo -e "  ℹ️  No label specified — replicating: ${_labels[*]}"
+    zep_info "No label specified — replicating: ${_labels[*]}"
 else
     _labels=("$label")
 fi
@@ -1174,7 +1174,7 @@ filesystem="$local_ds"
 if [[ "$LABEL_EXPLICIT" != true ]]; then
     dry_flag=""
     [[ "$DRY_RUN" == true ]] && dry_flag=" [DRY RUN]"
-    echo -e "${CHAIN_PREFIX}${C_CYAN}🏁${C_RESET} Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
+    zep_hdr "Start${dry_flag}: $(date); Filesystem: $local_ds; Label: $label"
     RESOLVED_KEEP=$(resolve_retention "$local_ds" "$label" "$keep_fallback")
 fi
 
@@ -1203,7 +1203,7 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
                 fi
 
                 if [[ $_elapsed -lt $_label_interval ]]; then
-                    echo "${CHAIN_PREFIX}  ⏭️  Label $label: last snapshot ${_elapsed}s ago (interval: ${_label_interval}s). Skipping."
+                    zep_info "Label $label: last snapshot ${_elapsed}s ago (interval: ${_label_interval}s). Skipping."
                     continue
                 fi
             fi
@@ -1214,29 +1214,28 @@ if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$PROMOTE" == false && -z 
     snap_name="${local_ds}@${snap_name_base}"
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} [DRY RUN] Would create snapshot: $snap_name"
+        zep_info "[DRY RUN] Would create snapshot: $snap_name"
     elif zfs list -t snapshot "$snap_name" >/dev/null 2>&1; then
-        # Snapshot already exists — make name unique by adding seconds
         timestamp=$(date -u +%Y-%m-%d-%H%M%S)
         snap_name_base="${REPL_SNAP_PREFIX}${label}-${timestamp}"
         snap_name="${local_ds}@${snap_name_base}"
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name (seconds-unique)"
+        zep_info "Creating snapshot: $snap_name (seconds-unique)"
         zfs snapshot "$snap_name" 2>&1 | indent_output
         [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
     else
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⏳${C_RESET} Creating snapshot: $snap_name"
+        zep_info "Creating snapshot: $snap_name"
         zfs snapshot "$snap_name" 2>&1 | indent_output
         [[ ${PIPESTATUS[0]} -eq 0 ]] || die "ERR: snapshot creation failed"
     fi
 else
     if [[ "$IS_DONOR" == true ]]; then
-        echo "${CHAIN_PREFIX}  ℹ️  Node $ME is acting as Donor. Skipping snapshot creation."
+        zep_info "Skipping snapshot creation (running as recovery peer for $TARGET_NODE)."
     elif [[ -n "$TARGET_NODE" ]]; then
-        echo "${CHAIN_PREFIX}  ℹ️  Point-to-point transfer to $TARGET_NODE. Skipping snapshot creation."
+        zep_info "Point-to-point transfer to $TARGET_NODE. Skipping snapshot creation."
     elif [[ "$PROMOTE" == true ]]; then
-        echo "${CHAIN_PREFIX}  ℹ️  Promoting chain. Skipping initial snapshot creation."
+        zep_info "Promoting chain. Skipping snapshot creation."
     else
-        echo "${CHAIN_PREFIX}  ℹ️  Not a master host ($ME), skipping snapshot creation."
+        zep_info "Not a master host ($ME), skipping snapshot creation."
     fi
 fi
 
@@ -1255,7 +1254,7 @@ fi
 PRE_REPL_SB=$(zfs get -H -o value zep:error:split-brain "$local_ds" 2>/dev/null)
 if [[ "$PRE_REPL_SB" == "true" ]]; then
     zfs inherit zep:error:split-brain "$local_ds" 2>/dev/null
-    echo -e "${CHAIN_PREFIX}  ${C_CYAN}ℹ️${C_RESET}  Split-Brain condition resolved on $local_ds. Cleared error flag."
+    zep_info "Split-Brain condition resolved on $local_ds. Cleared error flag."
     send_smtp_alert "warning" --task "replication" --status "split-brain resolved" "NOTICE: Split-Brain condition on $local_ds has been resolved. The error flag has been cleared."
     PRE_REPL_SB="false"
 fi
@@ -1276,11 +1275,11 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
 
     remote_ds=$(resolve_node_filesystem "$hop_node" "$raw_filesystem")
 
-    echo -e "${CHAIN_PREFIX}  ${C_CYAN}🚀${C_RESET} Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
+    zep_info "Attempting replication: $local_ds -> $HOP_TARGET (Pool: $NEXT_HOP_POOL)..."
 
     TRANSFER_DONE=false
     if [[ "$DRY_RUN" == true ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_CYAN}⏳${C_RESET} [DRY RUN] Would replicate $local_ds -> $HOP_TARGET"
+        zep_info "[DRY RUN] Would replicate $local_ds -> $HOP_TARGET"
         ZBUD_STATUS=0
         TRANSFER_DONE=true
     else
@@ -1289,24 +1288,23 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"
         ZBUD_STATUS=$?
         
-        # Moved from zfsbud_core: alert dispatch now lives in orchestrator
         case $ZBUD_STATUS in
             2) send_smtp_alert "critical" --detail --task "replication" --status "split-brain detected" "CRITICAL: Split-Brain Data Divergence on $remote_ds" ;;
         esac
     fi
 
     if [[ $ZBUD_STATUS -eq 0 ]]; then
-        echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Replication to $HOP_TARGET successful."
+        zep_ok "Replication to $HOP_TARGET successful."
         TRANSFER_DONE=true
     elif [[ $ZBUD_STATUS -eq 2 ]]; then
         HAD_SPLIT_BRAIN=true
         
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
-                zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Split-Brain detected on $hop_node. Aborting replication job."
+                zep_err "Split-Brain detected on $hop_node. Aborting replication job."
                 exit 2
             fi
-            echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
+            zep_err "Split-Brain detected on $hop_node. Skipping due to policy=resilience..."
 
             # Send alert for skipped node in resilience mode
             send_smtp_alert "critical" --detail --task "replication" --status "split-brain skipped" "Split-Brain detected on $hop_node ($remote_ds). Skipping node and continuing chain due to policy=resilience."
@@ -1315,29 +1313,29 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             TRANSFER_DONE=false
             continue
         else
-            zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} Split-Brain detected on $hop_node. Aborting replication job."
+            zep_err "Split-Brain detected on $hop_node. Aborting replication job."
             exit 2
         fi
     elif [[ $ZBUD_STATUS -eq 3 ]]; then
         if [[ "$REPL_POLICY" == "resilience" ]]; then
             if [[ "$hop_node" == "${NODES_REMAINING[-1]}" ]]; then
-                die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
+                die "Destination $hop_node has newer snapshots and Force is disabled. Aborting replication branch." 3
             fi
-            echo -e "${CHAIN_PREFIX}  ${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
+            zep_err "Destination $hop_node has newer snapshots and Force is disabled. Skipping due to policy=resilience..."
             REPLICATION_PARTIAL=true
             TRANSFER_DONE=false
             continue
         else
-            die "${C_RED}🚨 FATAL:${C_RESET} Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
+            die "Destination $hop_node has newer snapshots and Force is disabled. Aborting entire replication job." 3
         fi
     elif [[ $ZBUD_STATUS -eq 1 ]]; then
         send_smtp_alert "warning" --task "replication" --status "no common snapshots" "WARNING: No common snapshots for $local_ds to $remote_ds."
 
-        echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} No common snapshots with $hop_node. Searching chain for a donor..."
+        zep_warn "No common snapshots with $hop_node. Searching for a recovery peer..."
 
         DONOR_NODE=""
         if [[ "$IS_DONOR" == true ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Already acting as donor, skipping recursive discovery."
+            zep_info "Already acting as recovery peer, skipping recursive discovery."
         else
             DONOR_NODE=$(find_best_donor "$hop_node" "$raw_filesystem")
         fi
@@ -1347,7 +1345,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             donor_user=$(resolve_node_user "$DONOR_NODE" "$raw_filesystem")
             donor_target="${donor_user}@${donor_fqdn}"
 
-            echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ SUCCESS:${C_RESET} Found donor peer '"'"'$DONOR_NODE'"'"' ($donor_fqdn). Delegating healing of '"'"'$hop_node'"'"'..."
+            zep_ok "Found recovery peer $DONOR_NODE ($donor_fqdn). Re-syncing $hop_node..."
 
             donor_opts="--alias $DONOR_NODE --target $hop_node --donor"
             if [[ "$ZEP_BW" == "true" ]]; then donor_opts+=" -bw"; fi
@@ -1356,32 +1354,31 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             DONOR_PROPS_ARG="--sync-props ${sync_props_data:-$(get_repl_props_encoded "$local_ds")}"
 
             if ssh "$donor_target" "zep --fs $raw_filesystem --label $label --keep $keep_fallback $donor_opts $DONOR_PROPS_ARG"; then
-                echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Delegated replication from $DONOR_NODE to $hop_node successful."
+                zep_ok "Recovery sync from $DONOR_NODE to $hop_node complete."
 
-                # RETRY local replication now that common ground should exist
-                echo -e "${CHAIN_PREFIX}  ${C_YELLOW}🔄${C_RESET} Retrying local replication to $hop_node..."
+                zep_info "Retrying local replication to $hop_node..."
                 if zfsbud_core $zfsbud_opts -s "$NEXT_HOP_POOL" -e "ssh $HOP_TARGET" -v "$local_ds"; then
-                    echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅${C_RESET} Local replication retry successful."
+                    zep_ok "Local replication retry successful."
                     TRANSFER_DONE=true
-                    send_smtp_alert "info" --detail --task "replication" --status "node recovered" "SUCCESS: Node $hop_node ($HOP_TARGET) recovered via donor $DONOR_NODE. Chain re-established."
+                    send_smtp_alert "info" --detail --task "replication" --status "node recovered" "SUCCESS: Node $hop_node ($HOP_TARGET) recovered via $DONOR_NODE. Chain re-established."
                 else
-                    echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Local replication retry failed after donor healing."
+                    zep_err "Local replication retry failed after recovery sync."
                 fi
             else
-                echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Delegated replication from $DONOR_NODE failed."
+                zep_err "Recovery sync from $DONOR_NODE failed."
             fi
         else
-            echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} No suitable donor found for $hop_node."
+            zep_err "No recovery peer available for $hop_node."
         fi
     elif [[ $ZBUD_STATUS -eq 255 ]]; then
         send_smtp_alert "warning" --detail --task "replication" --status "node unreachable" "WARNING: Node $hop_node ($HOP_TARGET) is unreachable. SSH connection failed."
-        echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Node $hop_node is unreachable."
+        zep_err "Node $hop_node is unreachable."
     else
         [[ $ZBUD_STATUS -eq 6 ]] && send_smtp_alert "warning" --task "replication" --status "resume failed" "WARNING: Resume failed on $remote_ds — snapshots being transmitted were destroyed. Stale token cleared."
     fi
 
     if [[ "$TRANSFER_DONE" == false && "$REPL_POLICY" == "fail" ]]; then
-        die "Replication to $hop_node failed and no alternative donors succeeded. Aborting due to policy=fail."
+        die "Replication to $hop_node failed and no recovery peer succeeded. Aborting due to policy=fail."
     fi
 
     if [[ "$TRANSFER_DONE" == true ]]; then
@@ -1403,7 +1400,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         
         CASCADE_VERIFIED=false
         if [[ "$PROMOTE" == false && "$IS_DONOR" == false ]]; then
-            echo -e "${CHAIN_PREFIX}  ${C_BLUE}🔗${C_RESET} Cascading: triggering downstream chain for $remote_ds on $HOP_TARGET"
+            zep_info "Cascading: triggering downstream chain for $remote_ds on $HOP_TARGET"
             casc_opts="--alias $hop_node"
             if [[ "$initial_send" == true ]]; then casc_opts+=" --init"; fi
             if [[ "$DRY_RUN" == true ]]; then casc_opts+=" --dry-run"; fi
@@ -1423,7 +1420,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             if [[ $SSH_STATUS -eq 2 ]]; then
                 HAD_SPLIT_BRAIN=true
                 if [[ "$REPL_POLICY" == "resilience" ]]; then
-                    echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
+                    zep_warn "Split-Brain detected downstream from $hop_node. Skipping affected downstream nodes due to policy=resilience..."
                     REPLICATION_PARTIAL=true
                     break
                 else
@@ -1432,7 +1429,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
             fi
 
             if [[ $SSH_STATUS -eq 0 ]]; then
-                echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ VERIFICATION SUCCESS:${C_RESET} Downstream cascade for $local_ds on $HOP_TARGET completed successfully."
+                zep_ok "Downstream cascade for $local_ds on $HOP_TARGET completed successfully."
                 CASCADE_VERIFIED=true
                 # Record last_snapshot for all cascaded downstream nodes
                 if [[ "$IS_MASTER" == true && "$CASCADED" == false && "$DRY_RUN" != true && -n "$LATEST_SNAP" ]]; then
@@ -1444,7 +1441,7 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
                     fi
                 fi
             else
-                echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
+                zep_warn "Downstream cascade from $hop_node failed (Code: $SSH_STATUS)."
                 REPLICATION_PARTIAL=true
             fi
         else
@@ -1458,12 +1455,12 @@ while [[ $hop_idx -lt ${#NODES_REMAINING[@]} ]]; do
         elif [[ "$REPL_POLICY" == "fail" ]]; then
             die "Downstream verification/cascade failed for $hop_node. Aborting due to policy=fail."
         else
-            echo -e "${CHAIN_PREFIX}  ${C_YELLOW}⚠️  WARNING:${C_RESET} Continuing to next hop in chain due to policy=resilience..."
+            zep_warn "Continuing to next hop in chain due to policy=resilience..."
             REPLICATION_SUCCESS=true # We still count the local transfer as a partial success for shipped marking
             REPLICATION_PARTIAL=true
         fi
     else
-        echo -e "${CHAIN_PREFIX}  ${C_RED}❌ ERROR:${C_RESET} Replication to $hop_node failed. Skipping to next available node in chain..."
+        zep_err "Replication to $hop_node failed. Skipping to next available node in chain..."
         REPLICATION_PARTIAL=true
     fi
 done
@@ -1488,20 +1485,20 @@ fi
 if [[ "$REPLICATION_SUCCESS" == true ]]; then
     if [[ "$IS_MASTER" == true && "$CASCADED" == false && -n "$LATEST_SNAP" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
-            echo "${CHAIN_PREFIX}  🏷️  [DRY RUN] Would mark $LATEST_SNAP as shipped..."
+            zep_info "[DRY RUN] Would mark $LATEST_SNAP as shipped..."
         else
-            echo "${CHAIN_PREFIX}  🏷️  Marking sent snapshot $LATEST_SNAP as shipped."
+            zep_info "Marking sent snapshot $LATEST_SNAP as shipped."
             zfs set zep:shipped=true "$local_ds@$LATEST_SNAP"
         fi
     fi
 elif [[ "$exit_code" -ne 0 && "$HAD_SPLIT_BRAIN" != true ]]; then
-    echo "${CHAIN_PREFIX}  ❌ ERROR: All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}"
+    zep_err "All downstream replication attempts failed for chain: ${NODES_REMAINING[*]}"
     exit_code=${exit_code:-1}
 else
     if [[ "$IS_DONOR" == true ]]; then
-        echo "${CHAIN_PREFIX}  ℹ️  Donor run complete."
+        zep_info "Recovery run complete."
     else
-        echo "${CHAIN_PREFIX}  🏁 End of chain ($ME). Reporting state."
+        zep_info "End of chain ($ME). Reporting state."
     fi
 fi
 
@@ -1520,7 +1517,7 @@ fi
 
 dry_done=""
 [[ "$DRY_RUN" == true ]] && dry_done=" [DRY RUN]"
-echo -e "${CHAIN_PREFIX}  ${C_GREEN}✅ Done${C_RESET}${dry_done}: $(date)"
+zep_ok "Done${dry_done}: $(date)"
 
 # Clean up all replication temp files at the very end
 rm -f "$REPL_ERR_FILE" "$REPL_HINT_FILE"

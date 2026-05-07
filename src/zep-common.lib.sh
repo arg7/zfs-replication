@@ -204,20 +204,21 @@ get_snap_prefix() {
     fi
 }
 
-log_message() {
+_zep_write_log() {
     local msg="$1"
     local alias=${CLI_ALIAS:-$(hostname)}
     local prefix=${REPL_SNAP_PREFIX:-zep_}
     local uid=${REPL_LOG_UID:-$(id -u)}
     local cmd=${REPL_LOG_CMD:-zep}
     local log_file="/tmp/${prefix}${cmd}-${alias}-${uid}.log"
-    # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes
     local clean_msg=$(echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
     if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
         clean_msg="INFO: $clean_msg"
     fi
     echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $clean_msg" >> "$log_file" 2>/dev/null || true
 }
+
+log_message() { _zep_write_log "$1"; }
 
 parse_time_to_seconds() {
     local time_str="$1"
@@ -382,12 +383,12 @@ apply_repl_props() {
     local encoded=$2
     [[ -z "$encoded" ]] && return
 
-    echo -e "${CHAIN_PREFIX}  ${C_DIM}⚙️${C_RESET}  Syncing replication properties for $ds..."
+    zbud_msg "  ${C_DIM}⚙️${C_RESET}  Syncing replication properties for $ds..."
     local decoded
     decoded=$(echo -n "$encoded" | base64 -d 2>/dev/null)
     local rc=$?
     if [[ $rc -ne 0 || -z "$decoded" ]]; then
-        echo -e "${CHAIN_PREFIX}    ${C_RED}⚠️  Failed to decode properties${C_RESET}"
+        zbud_warn "Failed to decode properties"
         return
     fi
 
@@ -428,9 +429,9 @@ apply_repl_props() {
             local new_val="${p#*=}"
             if [[ "$current_val" != "$new_val" ]]; then
                  if [[ "$DRY_RUN" == true ]]; then
-                    echo -e "${CHAIN_PREFIX}    [DRY RUN] Would update $prop_key -> $new_val"
+                    zbud_msg "  ${C_DIM}[DRY RUN]${C_RESET} Would update $prop_key -> $new_val"
                  else
-                    zfs set "$p" "$ds" || echo -e "${CHAIN_PREFIX}    ${C_YELLOW}⚠️  WARNING:${C_RESET} Failed to set $p"
+                    zfs set "$p" "$ds" || zbud_warn "Failed to set $p"
                  fi
             fi
         fi
@@ -518,22 +519,25 @@ init_colors() {
 }
 init_colors
 
-zbud_msg() { 
+zbud_msg() {
     local msg="${CHAIN_PREFIX}    $*"
     echo -e "$msg" 1>&2
-    local alias=${CLI_ALIAS:-$(hostname)}
-    local prefix=${REPL_SNAP_PREFIX:-zep_}
-    local uid=${REPL_LOG_UID:-$(id -u)}
-    local cmd=${REPL_LOG_CMD:-zep}
-    local log_file="/tmp/${prefix}${cmd}-${alias}-${uid}.log"
-    # Strip ANSI codes, non-ASCII (emojis), and leading space/pipes from the message
-    local clean_msg=$(echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' | perl -CS -pe 's/[^\x20-\x7E]//g' | sed -e 's/^[[:space:]|]*//')
-    if [[ ! "$clean_msg" =~ ^(INFO|WARNING|ERROR|AUDIT|REPLICATION|ROTATION): ]]; then
-        clean_msg="INFO: $clean_msg"
-    fi
-    echo -e "$(date '+%Y-%m-%d %H:%M:%S') [$alias] $clean_msg" >> "$log_file" 2>/dev/null || true
+    _zep_write_log "$*"
 }
 zbud_warn() { zbud_msg "  ${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
+
+_zep_echo() {
+    local msg="${CHAIN_PREFIX}  $*"
+    echo -e "$msg" 1>&2
+    _zep_write_log "$*"
+}
+_zep_inline() { echo -ne "${CHAIN_PREFIX}  $*" 1>&2; }
+
+zep_info() { _zep_echo "${C_DIM}ℹ️${C_RESET} $*"; }
+zep_warn() { _zep_echo "${C_YELLOW}⚠️  WARNING:${C_RESET} $*"; }
+zep_err()  { _zep_echo "${C_RED}❌ ERROR:${C_RESET} $*"; }
+zep_ok()   { _zep_echo "${C_GREEN}✅${C_RESET} $*"; }
+zep_hdr()  { _zep_echo "${C_CYAN}🏁${C_RESET} $*"; }
 
 indent_output() {
     sed "s/^/${CHAIN_PREFIX}        /"
@@ -553,7 +557,7 @@ die() {
         esac
         shift
     done
-    zbud_msg "  ${C_RED}❌ ERROR:${C_RESET} $msg"
+    zep_err "$msg"
 
     if [[ -n "$local_ds" ]]; then
         if [[ -n "$detail_flag" ]]; then
@@ -564,18 +568,17 @@ die() {
     fi
     if [[ "$CASCADED" != true ]]; then
         if [[ -f "$REPL_HINT_FILE" ]]; then
-            # Only print from file if it wasn't already printed (exit code 2 means it was likely printed by zfsbud_core)
             if [[ "$exit_code" -ne 2 ]]; then
-                echo ""
-                echo -e "$(cat "$REPL_HINT_FILE" | sed 's/|HINT_NL|/\\n/g')"
+                echo "" >&2
+                echo -e "$(cat "$REPL_HINT_FILE" | sed 's/|HINT_NL|/\\n/g')" >&2
             fi
             rm -f "$REPL_HINT_FILE"
         elif [[ "$exit_code" -eq 1 ]]; then
-            echo ""
-            echo -e "${C_BOLD}HINT: If replication failed because there is no common ground:${C_RESET}"
-            echo "  - For a new destination: try adding the '--init' flag."
-            echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master."
-            echo "  - To force alignment without rollback: use '--promote --align-chain-data' on the Master."
+            echo "" >&2
+            zep_info "HINT: If replication failed because there is no common ground:"
+            echo "  - For a new destination: try adding the '--init' flag." >&2
+            echo "  - To rebuild an existing broken chain: use '--promote --auto -y' on the Master." >&2
+            echo "  - To force alignment without rollback: use '--promote --align-chain-data' on the Master." >&2
         fi
     fi
     exit $exit_code
